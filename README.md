@@ -16,6 +16,10 @@ DSH（DeepSeek Harness）动态插件：在对话输入框工具行提供一个�
 
 适用对象：DSH（本仓库部署形态）的 `web` profile。需要机器有 **Node.js（含 npm）**、到 npm 源的网络，以及系统已安装 **Chrome / Edge / Chromium / Brave / Opera 之一**（Windows）。
 
+```sh
+dsh plugin --profile web add "github:zlei1989/dsh-webpage-element-picker#main"
+```
+
 ### 构建
 
 本仓库是 TypeScript 源码 + tsup 构建的组合包（`lib/` 为构建产物，不入库，克隆后需先构建）：

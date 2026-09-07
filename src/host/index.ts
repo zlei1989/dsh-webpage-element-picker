@@ -38,6 +38,7 @@ import type {
   WebServerFace,
 } from './services'
 import type {
+  ContextItemSummary,
   DomElementPayload,
   DomRegistryEntry,
   HelperEvent,
@@ -261,6 +262,31 @@ export function apply(ctx: Context): void {
     commandQueue.push(cmd)
     if (commandQueue.length > 100) commandQueue.splice(0, commandQueue.length - 100)
     logDebug('命令入队等待 /poll: id=' + String(c.id) + ' method=' + String(c.method) + '（队列长度 ' + commandQueue.length + '）')
+  }
+
+  /**
+   * 生成元素的短标签（≤10 字），与 client 侧插入占位符时的 labelOf 规则一致：
+   * 可见文本 → aria-label/placeholder/alt/title/value → tag#id → tag.class → tag。
+   * 供 picker-context-list 的菜单摘要使用，保证历史节点再插入时占位符外观相同。
+   */
+  const registryLabel = (p: DomElementPayload): string => {
+    const short = (s: unknown): string => {
+      const t = String(s || '').replace(/\s+/g, ' ').trim()
+      return t.length > 10 ? t.slice(0, 10) + '…' : t
+    }
+    // 与 client labelOf 边界一致：textContent 非空（哪怕纯空白）即以其为准，
+    // 纯空白得到空标签，由调用方按「无标签」退化为裸 [DOMn]
+    if (p.textContent) return short(p.textContent)
+    const attrs = (p.attributes || {}) as Record<string, string>
+    for (const key of ['aria-label', 'placeholder', 'alt', 'title', 'value']) {
+      const t = short(attrs[key])
+      if (t) return t
+    }
+    const tag = String(p.tagName || '?')
+    if (p.id) return tag + '#' + String(p.id)
+    const cls = String(p.className || '').trim().split(/\s+/).slice(0, 2).join('.')
+    if (cls) return tag + '.' + cls
+    return tag
   }
 
   /**
@@ -764,6 +790,9 @@ export function apply(ctx: Context): void {
   /**
    * picker-pull：客户端 1.5s 轮询的增量拉取——返回 afterSeq 之后新选中的
    * 元素列表 + 当前状态，游标语义保证不重复投递。
+   * 附带 lastSeq（host 最大序号）与 contextCount（上下文节点数）：
+   * client 挂载后的首次响应只用 lastSeq 建立基线，历史 pending 不重放——
+   * 发送对话后组件重挂载/页面刷新时，旧元素不会被再次插入输入框。
    */
   const pickerPull: Handler = async (args) => {
     const after = Number((args && args.afterSeq) || 0)
@@ -771,7 +800,33 @@ export function apply(ctx: Context): void {
       .filter((e) => e.seq > after)
       .map((e) => ({ seq: e.seq, domId: e.domId, payload: e.payload }))
     if (elements.length) logDebug('picker-pull 投递 ' + elements.length + ' 个元素（afterSeq=' + after + '）')
-    return { ok: true, elements: elements, status: status }
+    return { ok: true, elements: elements, status: status, lastSeq: lastSeq, contextCount: domRegistry.length }
+  }
+
+  /**
+   * picker-context-list：返回上下文历史节点的轻量摘要（domId/标签/URL），
+   * 供对话框左下角的悬浮菜单展示；不含 payload 大字段，最多 200 条。
+   */
+  const pickerContextList: Handler = async () => {
+    const items: ContextItemSummary[] = domRegistry.map((e) => {
+      const p = e.payload || {}
+      return { domId: e.id, label: registryLabel(p), pageUrl: String(p.pageUrl || '') || undefined }
+    })
+    logDebug('picker-context-list 返回 ' + items.length + ' 个历史节点')
+    return { ok: true, items: items, contextCount: domRegistry.length }
+  }
+
+  /**
+   * picker-clear-context：清空全部上下文节点（domRegistry）与待插入队列
+   * （pending）。domCounter 不重置——旧对话消息中的 [DOMn] 引用不会因编号
+   * 复用而错指到新元素；系统提示的页面元素列表随注册表为空自动消失。
+   */
+  const pickerClearContext: Handler = async () => {
+    const removed = domRegistry.length
+    domRegistry = []
+    pending = []
+    logInfo('上下文已清空（移除 ' + removed + ' 个节点；编号计数保留，下一元素为 DOM' + (domCounter + 1) + '）')
+    return { ok: true, contextCount: 0 }
   }
 
   handlers.set('picker-navigate', pickerNavigate)
@@ -779,6 +834,8 @@ export function apply(ctx: Context): void {
   handlers.set('picker-status', pickerStatus)
   handlers.set('picker-close', pickerClose)
   handlers.set('picker-pull', pickerPull)
+  handlers.set('picker-context-list', pickerContextList)
+  handlers.set('picker-clear-context', pickerClearContext)
 
   // 插件卸载清理：尽力关闭 helper 子进程（先礼后兵：stdin.end 再 terminate）
   ctx.effect(() => () => {

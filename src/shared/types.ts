@@ -57,10 +57,23 @@ export type HelperEvent =
   | { type: 'helper-ready' }
   | { type: 'error'; message: string }
 
+/** 上下文历史节点的轻量摘要（picker-context-list 返回，不含大 payload）。 */
+export interface ContextItemSummary {
+  domId: string
+  label: string
+  pageUrl?: string
+}
+
 /** /invoke 方法供浏览器 UI 调用的结果信封。 */
 export interface InvokeResult {
   ok: boolean
   error?: string
   status?: PickerStatus
   elements?: PendingElement[]
+  /** picker-pull 附带：host 当前最大元素序号（client 挂载后首次响应仅用它建立轮询基线，不重放历史）。 */
+  lastSeq?: number
+  /** picker-pull / picker-context-list 附带：当前上下文节点数（domRegistry 长度）。 */
+  contextCount?: number
+  /** picker-context-list 返回：上下文历史节点摘要列表（按选中先后排序）。 */
+  items?: ContextItemSummary[]
 }

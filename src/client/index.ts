@@ -8,17 +8,25 @@
  * 元素详情。
  *
  * 本模块是包的 `./client` bundle 主体：tsup（tsup.config.ts）将其
- * 打包（external `react`——浏览器模块表通过注入的 `require` 提供），
- * 包裹在 web boot 握手中（`window.__ModuleLoader__.load({id, factory})`）。
- * 它通过 harness webserver 的 /dsh-webpage-element-picker/invoke 路由
- * （同源 fetch）与 host 半边通信。
+ * 打包（external `react` 与 `@deepseek-ai/dsh-client-ui-primitives`——
+ * 浏览器模块表通过注入的 `require` 提供两者），包裹在 web boot 握手中
+ * （`window.__ModuleLoader__.load({id, factory})`）。它通过 harness
+ * webserver 的 /dsh-webpage-element-picker/invoke 路由（同源 fetch）
+ * 与 host 半边通信。
+ *
+ * 样式：对话框结构复用 DSH 官方 Modal + Button 原语，其余细节（URL
+ * 输入框、状态行、历史菜单）只用 `--dsw-*` 语义令牌，因此浅色/深色
+ * 完全跟随 harness 的 body[data-ds-dark-theme] 切换，插件内不写任何
+ * 颜色字面量，也不做主题分支（见 docs/web-styling.md）。
  *
  * 日志：DEBUG 级走 console.debug——浏览器 DevTools 默认级别下不可见，
  * 等价于生产默认关闭；INFO/ERROR 直接输出。
  */
 
 import { React, h } from './react'
+import { PRIMITIVES } from './primitives'
 import type { ClientCtx, PickerEntryProps } from './services'
+import type { PrimitiveButtonProps, PrimitiveModalProps } from './primitives-types'
 import type { ContextItemSummary, InvokeResult, PendingElement, PickerStatus } from '../shared/types'
 
 const PLUGIN_ID = 'dsh-webpage-element-picker'
@@ -42,14 +50,130 @@ function logError(msg: string, err?: unknown): void {
   console.error(LOG_PREFIX + ' [ERROR] ' + msg + (detail ? '\n' + detail : ''))
 }
 
+/** 通知的语气：错误走红色，其余（未就绪/已添加）走琥珀提示色。 */
+type NoticeTone = 'info' | 'error'
+
+/**
+ * 渲染按钮：优先 DSH Button 原语；原语不可用时降级为等价样式的原生按钮。
+ * 降级分支只影响观感，点击/禁用语义与官方组件保持一致。
+ */
+function renderButton(props: PrimitiveButtonProps): React.ReactNode {
+  const el = h
+  if (PRIMITIVES.module) return el(PRIMITIVES.module.Button, props)
+  const primary = props.variant === 'primary'
+  return el(
+    'button',
+    {
+      type: 'button',
+      className: primary ? 'dsh-we-btnPrimary' : 'dsh-we-btnOutline',
+      onClick: props.onClick,
+      disabled: props.disabled,
+      title: props.title,
+    },
+    props.children,
+  )
+}
+
+/**
+ * 渲染对话框外壳：优先 DSH Modal 原语（Portal 到 body，自带 Esc 与点遮罩关闭）；
+ * 原语不可用时降级为结构等价的遮罩 + 卡片，尺寸与配色由 .dsh-we-* 样式表提供。
+ * children 即卡片内容（正文 + 底部栏），两种渲染路径消费同一份节点。
+ */
+function renderDialogShell(props: PrimitiveModalProps): React.ReactNode {
+  const el = h
+  if (PRIMITIVES.module) return el(PRIMITIVES.module.Modal, props)
+  return el(
+    'div',
+    {
+      className: 'dsh-we-overlay',
+      role: 'presentation',
+      onMouseDown: function (e: React.MouseEvent) {
+        if (e.target === e.currentTarget || (e.target as HTMLElement).className === 'dsh-we-mask') props.onClose()
+      },
+    },
+    el('div', { className: 'dsh-we-mask', 'aria-hidden': 'true' }),
+    el(
+      'div',
+      { className: 'dsh-we-panel dsh-we-dialog', role: 'dialog', 'aria-modal': 'true', 'aria-label': props.title },
+      el(
+        'div',
+        { className: 'dsh-we-fallbackHeader' },
+        el('h2', { className: 'dsh-we-fallbackTitle' }, props.title),
+        el('button', { type: 'button', className: 'dsh-we-fallbackClose', 'aria-label': props.closeLabel, onClick: props.onClose }, '×'),
+      ),
+      props.children,
+    ),
+  )
+}
+
+/**
+ * 插件自有样式表（注入到 document.head 的单个 <style>）。
+ *
+ * 分两层：
+ * 1. `.dsh-we-panel` 是 Modal 原语的等价卡片样式，仅在原语不可用时兜底
+ *    （见 primitives.ts）；原语可用时这些声明被原语的 CSS Module 覆盖。
+ * 2. `.dsh-we-*` 是插件自有区块，颜色一律取 `--dsw-alias-*` 语义令牌，
+ *    输入框圆角/描边对齐 DSH 对话框内 textarea 的既定做法（见
+ *    ui-message-feedback 的 FeedbackDialog）。
+ *
+ * 卡片几何用 `.dsh-we-dialog.dsh-we-dialog` 双类提高特异性：className
+ * 透传给原语卡片，而原语卡片的 CSS Module 类必须被覆盖（DSH 内部同样
+ * 用双类覆盖 Modal 几何）。
+ */
 const STYLE_CSS =
-  '.dsh-we-icon-btn { background: transparent; border: none; color: #9a9aa6; padding: 5px; border-radius: 6px; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; }' +
-  '.dsh-we-icon-btn:hover { background: rgba(255,255,255,0.08); color: #d8d8e0; }' +
-  '.dsh-we-icon-btn:disabled { opacity: 0.5; cursor: default; }' +
-  '.dsh-we-ctx-count { color: #8b8b96; font-size: 12px; padding: 4px 8px; border-radius: 6px; cursor: default; user-select: none; }' +
-  '.dsh-we-ctx-count:hover { background: rgba(255,255,255,0.06); color: #d8d8e0; }' +
-  '.dsh-we-ctx-item { background: transparent; border: none; width: 100%; text-align: left; cursor: pointer; display: flex; gap: 8px; align-items: baseline; padding: 6px 10px; font-family: inherit; }' +
-  '.dsh-we-ctx-item:hover { background: rgba(255,255,255,0.07); }'
+  // ---- 兜底层：Modal 原语不可用时的卡片外观（约等于原语 Modal 的实现） ----
+  '.dsh-we-overlay { position: fixed; inset: 0; z-index: 1000; display: flex; align-items: center; justify-content: center; padding: 24px; }' +
+  '.dsh-we-mask { position: absolute; inset: 0; background: var(--dsw-alias-bg-mask-1); backdrop-filter: var(--dsw-mask-blur); }' +
+  '.dsh-we-panel { position: relative; z-index: 1; display: flex; flex-direction: column; gap: 20px; width: min(380px, 100%); padding: 0 0 24px; overflow: hidden; border: 0; border-radius: 24px; background: var(--dsw-alias-bg-layer-2); box-shadow: var(--dsw-elevation-prominent); color: var(--dsw-alias-label-primary); font-family: var(--dsw-font-family); }' +
+  '.dsh-we-panelBody { display: flex; flex-direction: column; gap: 20px; }' +
+  // ---- 卡片几何：宽度放宽以容纳网址输入框与提示文案 ----
+  '.dsh-we-dialog.dsh-we-dialog { width: min(560px, 100%); gap: 0; }' +
+  // ---- 原语不可用时的头部/关闭按钮与按钮降级（原语可用时不会渲染） ----
+  '.dsh-we-fallbackHeader { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 22px 14px 12px 24px; }' +
+  '.dsh-we-fallbackTitle { margin: 0; font-size: 16px; line-height: 24px; font-weight: 500; color: var(--dsw-alias-label-primary); }' +
+  '.dsh-we-fallbackClose { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; border: none; border-radius: 8px; background: transparent; color: var(--dsw-alias-label-secondary); font-size: 18px; line-height: 1; cursor: pointer; }' +
+  '.dsh-we-fallbackClose:hover { background: var(--dsw-alias-interactive-bg-hover); }' +
+  '.dsh-we-btnOutline, .dsh-we-btnPrimary { display: inline-flex; align-items: center; justify-content: center; height: 36px; padding: 0 14px; border-radius: 18px; font-family: inherit; font-size: 14px; line-height: 22px; cursor: pointer; }' +
+  '.dsh-we-btnOutline { border: 0.5px solid var(--dsw-alias-border-l3); background: transparent; color: var(--dsw-alias-label-primary); }' +
+  '.dsh-we-btnOutline:hover:not(:disabled) { background: var(--dsw-alias-interactive-bg-hover); }' +
+  '.dsh-we-btnPrimary { border: none; background: var(--dsw-alias-button-primary-fill); color: var(--dsw-alias-label-primary-foreground); }' +
+  '.dsh-we-btnPrimary:hover:not(:disabled) { background: var(--dsw-alias-button-primary-hover); }' +
+  '.dsh-we-btnOutline:disabled, .dsh-we-btnPrimary:disabled { opacity: 0.4; cursor: not-allowed; }' +
+  // ---- 正文区块 ----
+  '.dsh-we-body { display: flex; flex-direction: column; gap: 10px; padding: 0 24px; }' +
+  '.dsh-we-input { box-sizing: border-box; width: 100%; min-height: 92px; padding: 12px 14px; border: 0.5px solid var(--dsw-alias-border-l4); border-radius: 16px; background: var(--dsw-alias-bg-layer-1); color: var(--dsw-alias-label-primary); font-family: var(--dsw-font-family); font-size: 14px; line-height: 22px; resize: vertical; outline: none; transition: border-color 120ms ease, box-shadow 120ms ease; }' +
+  '.dsh-we-input::placeholder { color: var(--dsw-alias-label-caption); }' +
+  '.dsh-we-input:focus { border-color: var(--dsw-alias-border-l3); box-shadow: 0 0 0 1px var(--dsw-alias-border-l3); }' +
+  '.dsh-we-status { font-size: 13px; line-height: 20px; color: var(--dsw-alias-state-business-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }' +
+  '.dsh-we-hint { font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-caption); }' +
+  '.dsh-we-notice { font-size: 12px; line-height: 18px; }' +
+  '.dsh-we-noticeInfo { color: var(--dsw-alias-state-warn-label); }' +
+  '.dsh-we-noticeError { color: var(--dsw-alias-state-error-primary); }' +
+  // ---- 底部栏：左侧上下文计数（悬浮展开历史菜单），右侧操作按钮 ----
+  '.dsh-we-footer { display: flex; align-items: center; gap: 8px; justify-content: space-between; margin-top: 20px; padding: 16px 24px 0; border-top: 0.5px solid var(--dsw-alias-border-l1); }' +
+  '.dsh-we-footerLeft { position: relative; display: flex; align-items: center; }' +
+  '.dsh-we-footerRight { display: flex; align-items: center; gap: 8px; }' +
+  '.dsh-we-ctxCount { padding: 4px 8px; border-radius: 8px; color: var(--dsw-alias-label-secondary); font-size: 13px; line-height: 20px; cursor: default; user-select: none; }' +
+  '.dsh-we-ctxCount:hover { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }' +
+  // ---- 历史节点菜单（向上展开；悬浮层：elevation + scrollbar l2 重绑） ----
+  // z-index 显式抬升：菜单与对话框正文同处一个层叠上下文，靠 DOM 顺序压住正文
+  // 在部分合成路径下不够稳，这里直接按悬浮层语义声明层级
+  '.dsh-we-menu { position: absolute; left: 0; bottom: 100%; z-index: 1; display: flex; flex-direction: column; width: 280px; overflow: hidden; border: 0; border-radius: 12px; background: var(--dsw-alias-bg-layer-2); --dsw-elevation-stroke-color: var(--dsw-alias-border-l1); box-shadow: var(--dsw-elevation-panel); --dsh-scrollbar-thumb: var(--dsw-alias-scrollbar-bg-l2); --dsh-scrollbar-thumb-hover: var(--dsw-alias-scrollbar-hover-l2); }' +
+  '.dsh-we-menuHeader { padding: 8px 10px 6px; border-bottom: 0.5px solid var(--dsw-alias-border-l1); color: var(--dsw-alias-label-caption); font-size: 11px; line-height: 16px; }' +
+  '.dsh-we-menuList { max-height: 200px; overflow-y: auto; }' +
+  '.dsh-we-menuItem { display: flex; gap: 8px; align-items: baseline; width: 100%; padding: 6px 10px; border: none; background: transparent; font-family: inherit; text-align: left; cursor: pointer; }' +
+  '.dsh-we-menuItem:hover { background: var(--dsw-alias-interactive-bg-hover); }' +
+  '.dsh-we-menuItemId { flex-shrink: 0; color: var(--dsw-alias-state-business-primary); font-size: 12px; line-height: 18px; }' +
+  '.dsh-we-menuItemLabel { overflow: hidden; color: var(--dsw-alias-label-primary); font-size: 12px; line-height: 18px; text-overflow: ellipsis; white-space: nowrap; }' +
+  '.dsh-we-menuEmpty { padding: 12px 10px; color: var(--dsw-alias-label-caption); font-size: 12px; line-height: 18px; text-align: center; }' +
+  '.dsh-we-menuFooter { display: flex; justify-content: flex-end; padding: 6px 10px; border-top: 0.5px solid var(--dsw-alias-border-l1); }' +
+  // ---- 输入框工具行的十字图标按钮（本轮不改动其尺寸，仅令牌化配色） ----
+  '.dsh-we-iconBtn { display: inline-flex; align-items: center; justify-content: center; padding: 5px; border: none; border-radius: 6px; background: transparent; color: var(--dsw-alias-label-secondary); cursor: pointer; }' +
+  '.dsh-we-iconBtn:hover { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }' +
+  '.dsh-we-iconBtn:disabled { opacity: 0.4; cursor: default; }' +
+  // ---- 键盘可达性：焦点环与按钮一致，动效跟随系统减少动效偏好 ----
+  '.dsh-we-iconBtn:focus-visible, .dsh-we-input:focus-visible, .dsh-we-fallbackClose:focus-visible { outline: 2px solid var(--dsw-alias-button-primary-fill); outline-offset: 2px; }' +
+  '@media (prefers-reduced-motion: reduce) { .dsh-we-input { transition: none; } }'
 
 /**
  * 调用 host 半边的 picker-* 处理器（POST 到 harness webserver 路由）。
@@ -113,33 +237,6 @@ function placeholderLine(item: PendingElement): string {
   return '[' + label + '][' + id + ']'
 }
 
-const S: Record<string, React.CSSProperties> = {
-  backdrop: { position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.55)', zIndex: 1000000, display: 'flex', alignItems: 'center', justifyContent: 'center' },
-  panel: { width: 560, maxWidth: '92vw', background: '#1b1b22', border: '1px solid #34343e', borderRadius: 12, boxShadow: '0 12px 40px rgba(0,0,0,0.55)', display: 'flex', flexDirection: 'column', overflow: 'hidden' },
-  header: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 16px', borderBottom: '1px solid #2a2a33' },
-  title: { color: '#e6e6eb', fontSize: 14, fontWeight: 600 },
-  closeBtn: { background: 'none', border: 'none', color: '#8b8b96', fontSize: 18, cursor: 'pointer', padding: '0 4px', lineHeight: 1 },
-  body: { padding: 16, display: 'flex', flexDirection: 'column', gap: 10 },
-  textarea: { width: '100%', boxSizing: 'border-box', background: '#121218', color: '#e6e6eb', border: '1px solid #34343e', borderRadius: 8, padding: 10, fontSize: 13, fontFamily: 'inherit', resize: 'vertical', outline: 'none', minHeight: 84, lineHeight: 1.5 },
-  statusLine: { color: '#9fd0ff', fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
-  notice: { color: '#f5c56b', fontSize: 12 },
-  hint: { color: '#8b8b96', fontSize: 11, lineHeight: 1.6 },
-  footer: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, padding: '12px 16px', borderTop: '1px solid #2a2a33' },
-  footerLeft: { position: 'relative', display: 'flex', alignItems: 'center' },
-  footerRight: { display: 'flex', gap: 8 },
-  contextMenu: { position: 'absolute', left: 0, bottom: '100%', width: 280, background: '#121218', border: '1px solid #34343e', borderRadius: 8, boxShadow: '0 8px 24px rgba(0,0,0,0.5)', display: 'flex', flexDirection: 'column', overflow: 'hidden' },
-  menuHeader: { color: '#8b8b96', fontSize: 11, padding: '8px 10px 6px', borderBottom: '1px solid #2a2a33' },
-  menuList: { overflowY: 'auto', maxHeight: 200 },
-  menuItemId: { color: '#9fd0ff', fontSize: 12, flexShrink: 0 },
-  menuItemLabel: { color: '#c9c9d1', fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
-  menuEmpty: { color: '#8b8b96', fontSize: 12, padding: '12px 10px', textAlign: 'center' },
-  menuFooter: { borderTop: '1px solid #2a2a33', padding: '6px 10px', display: 'flex', justifyContent: 'flex-end' },
-  clearBtn: { background: 'transparent', color: '#c9c9d1', border: '1px solid #34343e', borderRadius: 6, padding: '3px 12px', fontSize: 12, cursor: 'pointer', fontFamily: 'inherit' },
-  clearBtnArmed: { background: '#b33939', color: '#fff', border: '1px solid #d64545', borderRadius: 6, padding: '3px 12px', fontSize: 12, cursor: 'pointer', fontFamily: 'inherit' },
-  ghostBtn: { background: 'transparent', color: '#c9c9d1', border: '1px solid #34343e', borderRadius: 8, padding: '6px 14px', fontSize: 13, cursor: 'pointer', fontFamily: 'inherit' },
-  primaryBtn: { background: '#3b82f6', color: '#fff', border: 'none', borderRadius: 8, padding: '6px 16px', fontSize: 13, cursor: 'pointer', fontFamily: 'inherit' },
-}
-
 /** 十字准星 SVG 图标（输入框左侧槽位按钮的内容）。 */
 function crosshairIcon(el: typeof h): React.ReactNode {
   return el(
@@ -183,7 +280,8 @@ function PickerEntry(props: PickerEntryProps): React.ReactNode {
   const statusState2 = React.useState<PickerStatus | null>(null)
   const status = statusState2[0]
   const setStatus = statusState2[1]
-  const noticeState = React.useState('')
+  // 通知分语气：错误（打开/清空失败）红色，提示（已添加/已注入）琥珀色
+  const noticeState = React.useState<{ text: string; tone: NoticeTone } | null>(null)
   const notice = noticeState[0]
   const setNotice = noticeState[1]
   // 上下文区域状态：计数随轮询更新；菜单/列表/清空确认仅对话框内交互使用
@@ -202,10 +300,11 @@ function PickerEntry(props: PickerEntryProps): React.ReactNode {
   const statusState = status ? status.state : null
 
   /** 显示一条通知，5 秒后自动清除（仅当内容未被后续通知覆盖时）。 */
-  const showNotice = function (text: string): void {
-    setNotice(text)
+  const showNotice = function (text: string, tone?: NoticeTone): void {
+    const next = { text: text, tone: tone || 'info' }
+    setNotice(next)
     window.setTimeout(function () {
-      setNotice(function (cur) { return cur === text ? '' : cur })
+      setNotice(function (cur) { return cur && cur.text === text ? null : cur })
     }, 5000)
   }
 
@@ -293,12 +392,12 @@ function PickerEntry(props: PickerEntryProps): React.ReactNode {
           setContextCount(0)
           showNotice('已清空全部上下文节点（输入框中已有占位符的引用将失效）')
         } else {
-          showNotice('清空失败：' + ((res && res.error) || '未知错误'))
+          showNotice('清空失败：' + ((res && res.error) || '未知错误'), 'error')
         }
       })
       .catch(function (err) {
         logError('清空上下文失败', err)
-        showNotice('清空失败：' + String((err && err.message) || err))
+        showNotice('清空失败：' + String((err && err.message) || err), 'error')
       })
   }
 
@@ -378,12 +477,12 @@ function PickerEntry(props: PickerEntryProps): React.ReactNode {
     // 多行输入只取第一个非空行（提示文案已说明"每行一个，使用第一行"）
     const url = String(urlText || '').split('\n').map(function (s) { return s.trim() }).filter(Boolean)[0] || ''
     if (!url) {
-      showNotice('请先输入网址')
+      showNotice('请先输入网址', 'error')
       return
     }
     if (!/^https?:\/\//i.test(url)) {
       logDebug('网址校验未通过（需 http/https）: ' + url)
-      showNotice('网址需以 http:// 或 https:// 开头')
+      showNotice('网址需以 http:// 或 https:// 开头', 'error')
       return
     }
     logInfo('用户请求打开网址: ' + url)
@@ -394,12 +493,12 @@ function PickerEntry(props: PickerEntryProps): React.ReactNode {
           setStatus(Object.assign({ state: 'open' as const }, res.status || { url: url }))
           setOpen(false)
         } else {
-          showNotice('打开失败：' + ((res && res.error) || '未知错误'))
+          showNotice('打开失败：' + ((res && res.error) || '未知错误'), 'error')
         }
       })
       .catch(function (err) {
         logError('打开网址失败: ' + url, err)
-        showNotice('打开失败：' + String((err && err.message) || err))
+        showNotice('打开失败：' + String((err && err.message) || err), 'error')
       })
       .finally(function () {
         setBusy(false)
@@ -416,12 +515,12 @@ function PickerEntry(props: PickerEntryProps): React.ReactNode {
           setStatus(Object.assign({ state: 'open' as const }, res.status || status))
           showNotice('已重新注入选择功能')
         } else {
-          showNotice('重新注入失败：' + ((res && res.error) || '未知错误'))
+          showNotice('重新注入失败：' + ((res && res.error) || '未知错误'), 'error')
         }
       })
       .catch(function (err) {
         logError('重新注入失败', err)
-        showNotice('重新注入失败：' + String((err && err.message) || err))
+        showNotice('重新注入失败：' + String((err && err.message) || err), 'error')
       })
       .finally(function () {
         setBusy(false)
@@ -439,6 +538,18 @@ function PickerEntry(props: PickerEntryProps): React.ReactNode {
     : ''
   const buttonTitle = tooltip || '打开浏览器并选择页面元素'
 
+  /** 对话框中的状态行文案（原语 Modal 不可用时兜底卡片与它在同一层）。 */
+  const statusLine = status
+    ? '状态：' +
+      (status.message ||
+        (status.state === 'open'
+          ? browserLabel + '已打开 ' + (status.url || '') +
+            (status.modeExited ? ' · 选择模式已退出' : status.injected ? ' · 已注入选择功能' : '')
+          : status.state === 'ready'
+            ? '浏览器已就绪'
+            : status.state))
+    : ''
+
   /**
    * 渲染上下文历史节点悬浮菜单（footer 左下角「上下文：N 项」悬停时出现，
    * 向上展开）。菜单项最新在上，点击插入占位符；底部是二次确认的清空按钮。
@@ -447,121 +558,120 @@ function PickerEntry(props: PickerEntryProps): React.ReactNode {
     const items = contextItems.slice().reverse()
     return el(
       'div',
-      { style: S.contextMenu },
-      el('div', { style: S.menuHeader }, '历史节点（点击插入输入框）'),
+      { className: 'dsh-we-menu', role: 'menu' },
+      el('div', { className: 'dsh-we-menuHeader' }, '历史节点（点击插入输入框）'),
       items.length
         ? el(
             'div',
-            { style: S.menuList },
+            { className: 'dsh-we-menuList' },
             items.map(function (item) {
               return el(
                 'button',
                 {
                   key: item.domId,
-                  className: 'dsh-we-ctx-item',
+                  type: 'button',
+                  className: 'dsh-we-menuItem',
                   title: item.pageUrl || item.domId,
                   onClick: function () { insertContextItem(item) },
                 },
-                el('span', { style: S.menuItemId }, item.domId),
-                el('span', { style: S.menuItemLabel }, item.label || '(无标签)'),
+                el('span', { className: 'dsh-we-menuItemId' }, item.domId),
+                el('span', { className: 'dsh-we-menuItemLabel' }, item.label || '(无标签)'),
               )
             }),
           )
-        : el('div', { style: S.menuEmpty }, contextCount > 0 ? '列表加载失败，请重新悬停重试' : '暂无历史节点'),
+        : el('div', { className: 'dsh-we-menuEmpty' }, contextCount > 0 ? '列表加载失败，请重新悬停重试' : '暂无历史节点'),
       el(
         'div',
-        { style: S.menuFooter },
-        el(
-          'button',
-          { onClick: onClearClick, disabled: !contextCount && !clearArmed, style: clearArmed ? S.clearBtnArmed : S.clearBtn },
-          clearArmed ? '确认清空？' : '清空',
-        ),
+        { className: 'dsh-we-menuFooter' },
+        renderButton({
+          variant: 'outline',
+          size: 'sm',
+          onClick: onClearClick,
+          disabled: !contextCount && !clearArmed,
+          title: clearArmed ? '再次点击清空全部历史节点' : '清空全部历史节点',
+          children: clearArmed ? '确认清空？' : '清空',
+        }),
       ),
     )
   }
 
-  /** 渲染「添加页面元素」对话框（点击 backdrop 空白处关闭）。 */
-  const renderDialog = function (): React.ReactNode {
+  /**
+   * 渲染对话框正文：网址输入框 → 状态行 → 通知 → 使用提示。
+   * 结构复用原语 Modal 的 body（左右 24px 内边距），此处只补区块间距。
+   */
+  const renderDialogBody = function (): React.ReactNode {
     return el(
       'div',
-      {
-        style: S.backdrop,
-        onMouseDown: function (e: React.MouseEvent) {
-          if (e.target === e.currentTarget) setOpen(false)
-        },
-      },
+      { className: 'dsh-we-body' },
+      el('textarea', {
+        value: urlText,
+        onChange: function (e: React.ChangeEvent<HTMLTextAreaElement>) { setUrlText(e.target.value) },
+        rows: 3,
+        placeholder: '输入网址（每行一个，使用第一行），例如：\nhttps://example.com',
+        'aria-label': '网址',
+        className: 'dsh-we-input',
+      }),
+      statusLine ? el('div', { className: 'dsh-we-status' }, statusLine) : null,
+      notice
+        ? el('div', { className: 'dsh-we-notice ' + (notice.tone === 'error' ? 'dsh-we-noticeError' : 'dsh-we-noticeInfo'), role: 'status' }, notice.text)
+        : null,
       el(
         'div',
-        { style: S.panel },
-        el(
-          'div',
-          { style: S.header },
-          el('div', { style: S.title }, '添加页面元素'),
-          el('button', { onClick: function () { setOpen(false) }, style: S.closeBtn }, '×'),
-        ),
-        el(
-          'div',
-          { style: S.body },
-          el('textarea', {
-            value: urlText,
-            onChange: function (e: React.ChangeEvent<HTMLTextAreaElement>) { setUrlText(e.target.value) },
-            rows: 4,
-            placeholder: '输入网址（每行一个，使用第一行），例如：\nhttps://example.com',
-            style: S.textarea,
-          }),
-          status
-            ? el(
-                'div',
-                { style: S.statusLine },
-                '状态：' +
-                  (status.message ||
-                    (status.state === 'open'
-                      ? browserLabel + '已打开 ' + (status.url || '') +
-                        (status.modeExited ? ' · 选择模式已退出' : status.injected ? ' · 已注入选择功能' : '')
-                      : status.state === 'ready'
-                        ? '浏览器已就绪'
-                        : status.state)),
-              )
-            : null,
-          notice ? el('div', { style: S.notice }, notice) : null,
-          el(
-            'div',
-            { style: S.hint },
-            '提示：在页面中点击元素，再点「添加到对话」，即可在输入框插入 [标签][DOMn] 引用式占位符；完整元素信息由模型按需通过 read_picked_element 工具读取。浏览器使用系统已安装的 Chrome/Edge 等（自动探测，绝不下载）；首次打开需安装约 13MB 的 playwright-core 运行时（不含浏览器）并探测系统浏览器，之后秒开。需要登录时：先点页面右下角的「选择模式」悬浮按钮（或按 ` 键）暂停选择，登录完成后回到这里点「仅重新注入」即可在当前页面恢复选择功能；如需回到输入的网址则点「打开」。',
-          ),
-        ),
-        el(
-          'div',
-          { style: S.footer },
-          // 左区：上下文计数 + 悬浮历史菜单。菜单与计数在同一个包裹元素内，
-          // 鼠标在两者间移动不触发 mouseleave，移出整个区域才关闭菜单
-          el(
-            'div',
-            {
-              style: S.footerLeft,
-              onMouseEnter: function () {
-                setMenuOpen(true)
-                loadContextItems()
-              },
-              onMouseLeave: function () {
-                setMenuOpen(false)
-                setClearArmed(false)
-              },
-            },
-            el('span', { className: 'dsh-we-ctx-count' }, '上下文：' + contextCount + ' 项'),
-            menuOpen ? renderContextMenu() : null,
-          ),
-          // 右区：原操作按钮组
-          el(
-            'div',
-            { style: S.footerRight },
-            el('button', { onClick: function () { setOpen(false) }, style: S.ghostBtn }, '关闭'),
-            el('button', { onClick: onReinject, disabled: busy, style: S.ghostBtn }, '仅重新注入'),
-            el('button', { onClick: onConfirm, disabled: busy, style: S.primaryBtn }, busy ? '打开中…' : '打开'),
-          ),
-        ),
+        { className: 'dsh-we-hint' },
+        '提示：在页面中点击元素，再点「添加到对话」，即可在输入框插入 [标签][DOMn] 引用式占位符；完整元素信息由模型按需通过 read_picked_element 工具读取。浏览器使用系统已安装的 Chrome/Edge 等（自动探测，绝不下载）；首次打开需安装约 13MB 的 playwright-core 运行时（不含浏览器）并探测系统浏览器，之后秒开。需要登录时：先点页面右下角的「选择模式」悬浮按钮（或按 ` 键）暂停选择，登录完成后回到这里点「仅重新注入」即可在当前页面恢复选择功能；如需回到输入的网址则点「打开」。',
       ),
     )
+  }
+
+  /**
+   * 渲染对话框底部栏：左侧上下文计数（悬浮历史菜单），右侧关闭/重注入/打开。
+   * 按钮一律使用 DSH Button 原语（outline + primary），间距由其自带的 8px gap 提供。
+   */
+  const renderDialogFooter = function (): React.ReactNode {
+    return el(
+      'div',
+      { className: 'dsh-we-footer' },
+      // 左区：上下文计数 + 悬浮历史菜单。菜单与计数在同一个包裹元素内，
+      // 鼠标在两者间移动不触发 mouseleave，移出整个区域才关闭菜单
+      el(
+        'div',
+        {
+          className: 'dsh-we-footerLeft',
+          onMouseEnter: function () {
+            setMenuOpen(true)
+            loadContextItems()
+          },
+          onMouseLeave: function () {
+            setMenuOpen(false)
+            setClearArmed(false)
+          },
+        },
+        el('span', { className: 'dsh-we-ctxCount' }, '上下文：' + contextCount + ' 项'),
+        menuOpen ? renderContextMenu() : null,
+      ),
+      el(
+        'div',
+        { className: 'dsh-we-footerRight' },
+        // 尺寸取原语默认的 md（36px 胶囊，r18）：与 DSH 对话框底部按钮同规格
+        renderButton({ variant: 'outline', onClick: function () { setOpen(false) }, children: '关闭' }),
+        renderButton({ variant: 'outline', onClick: onReinject, disabled: busy, children: '仅重新注入' }),
+        renderButton({ variant: 'primary', onClick: onConfirm, disabled: busy, children: busy ? '打开中…' : '打开' }),
+      ),
+    )
+  }
+
+  /** 渲染「添加页面元素」对话框（原语 Modal：Esc 与点击遮罩关闭）。 */
+  const renderDialog = function (): React.ReactNode {
+    return renderDialogShell({
+      open: true,
+      title: '添加页面元素',
+      closeLabel: '关闭',
+      onClose: function () { setOpen(false) },
+      className: 'dsh-we-dialog',
+      // 正文与底部栏包在同一个弹性列里：卡片 gap 置 0 后由这个容器统一排版，
+      // 原语可用与否都由 .dsh-we-panelBody 给出同一套 20px 节奏
+      children: el('div', { className: 'dsh-we-panelBody' }, renderDialogBody(), renderDialogFooter()),
+    })
   }
 
   return el(
@@ -570,10 +680,11 @@ function PickerEntry(props: PickerEntryProps): React.ReactNode {
     el(
       'button',
       {
-        className: 'dsh-we-icon-btn',
+        type: 'button',
+        className: 'dsh-we-iconBtn',
         onClick: function () {
           setOpen(true)
-          setNotice('')
+          setNotice(null)
         },
         title: buttonTitle,
         'aria-label': '添加页面元素',
@@ -617,7 +728,11 @@ function apply(ctx: ClientCtx): void {
     })
   }, 'dsh-webpage-element-picker: slot registration')
 
-  logInfo('client 插件已加载（槽位 conversation.input.left）')
+  logInfo(
+    PRIMITIVES.module
+      ? 'client 插件已加载（槽位 conversation.input.left，UI 使用 DSH 原语 Modal/Button）'
+      : 'client 插件已加载（槽位 conversation.input.left，UI 原语不可用，已降级为内置样式：' + PRIMITIVES.error + '）',
+  )
 }
 
 // loader 契约：bundle 外层包裹（tsup banner）提供局部 module/exports，

@@ -5,6 +5,7 @@ DSH（DeepSeek Harness）动态插件：在对话输入框工具行提供一个�
 ## 特性
 
 - 输入框工具行纯图标入口（`conversation.input.left`），状态信息显示在 tooltip
+- 对话框采用 DSH 默认风格：外壳复用官方 `Modal` + `Button` 原语（遮罩模糊、24px 圆角卡片、elevation 阴影、Esc/点遮罩关闭），URL 输入框与历史菜单只用 `--dsw-*` 语义令牌——**浅色与深色跟随 harness 设置实时切换，插件内不写颜色字面量、不做主题分支**
 - 使用系统已安装的浏览器（自动探测 Chrome > Edge > Chromium > Brave > Opera，**绝不下载任何浏览器**）：通过 `npm` 安装约 13MB 的 `playwright-core` 运行时（仅一次），之后秒开
 - 页面注入元素选择脚本：悬浮高亮 → 点击锁定 → 「添加到对话」；`` ` `` 键或页面右下角按钮可暂停/恢复（登录场景）；Esc 退出选择模式
 - 选中元素后输入框插入 markdown 引用式占位符：`[提交订单][DOM1]`（标签取元素文本/无障碍属性/tag#id，最长 10 字）
@@ -37,9 +38,20 @@ pnpm build        # tsup：src/host → lib/index.js（ESM），src/client → l
 
 本仓库是符合 DSH **组合包（bundle）** 格式的 npm 包：
 
-- `package.json` 声明 `dsh.bundle`（`cordis.patch.yml` 配置层）与 `dsh.client`（浏览器半 `exports["./client"]`）；
-- host 半 `src/host/index.ts`（构建为 `lib/index.js`）是原生 Cordis 插件，`inject` 声明的七个服务就绪后才运行；client 半 `src/client/index.ts`（构建为 `lib/client.js`，`window.__ModuleLoader__.load` 工厂，唯一外部依赖 `react`）；
+- `package.json` 声明 `dsh.bundle`（`cordis.patch.yml` 配置层）与 `dsh.client`（浏览器半 `exports["./client"]`，`external` 声明对 DSH UI 原语的运行时依赖）；
+- host 半 `src/host/index.ts`（构建为 `lib/index.js`）是原生 Cordis 插件，`inject` 声明的七个服务就绪后才运行；client 半 `src/client/index.ts`（构建为 `lib/client.js`，`window.__ModuleLoader__.load` 工厂）；
 - `cordis.patch.yml` 插入一行 `name: dsh-webpage-element-picker`，同一行同时被 Loader（host 半）和 client-modules 扫描（浏览器半）使用。
+
+### 客户端依赖
+
+client 半的运行时外部依赖只有两个，都由 harness 浏览器模块表提供（不随包分发）：
+
+| specifier | 用途 | 声明位置 |
+|-----------|------|----------|
+| `react` | 组件运行时（经 `src/client/react.ts` 单点引入） | tsdown/tsup client external |
+| `@deepseek-ai/dsh-client-ui-primitives` | 官方 `Modal` + `Button` 原语（经 `src/client/primitives.ts` 单点引入），对话框因此与 DSH 自身界面像素一致 | `package.json` 的 `dsh.client.external` + `tsup.config.ts` 的 client `external` |
+
+`dsh.client.external` 是 host 排 boot 图的依据：改了其中一个必须同步改另一个。宿主 DSH 若未提供原语（旧版本），插件不会崩——`src/client/primitives.ts` 会回报失败原因并降级为等价的内置样式（控制台 INFO 日志会写明）。
 
 在插件 checkout 内执行（`dsh` CLI 与 pnpm 需在 PATH 上）：
 
@@ -72,6 +84,9 @@ src/
     services.ts    # Host 侧服务接口（subprocess/webServer/fs/tools/…，type-only）
   client/
     index.ts       # Client 半：conversation.input.left 十字图标 + 对话框，构建为 lib/client.js
+                   #   内含 STYLE_CSS（插件自有样式表，全部 --dsw-* 令牌）与降级渲染
+    primitives.ts  # 从模块表取 DSH UI 原语（Modal/Button）的唯一入口，失败回报原因
+    primitives-types.d.ts # 原语的本地类型表面（该包不列入本包依赖）
     services.ts    # Client 侧服务接口（slots/输入框标准 props，type-only）
     react.ts       # 由注入 require 取得 react 的唯一入口
     globals.d.ts   # 浏览器 bundle 的运行时全局（require/module/exports）声明
@@ -105,6 +120,7 @@ DSH Client(插件) ── conversation.input.left 图标 ── fetch /invoke �
 ## 已知限制
 
 - bundle 形态跨 DSH 重启持久（`dsh.profile.bundles` 层）。
+- 对话框的原语复用要求宿主 DSH 在浏览器模块表里提供 `@deepseek-ai/dsh-client-ui-primitives`（带 UI 的常规 DSH 版本都有）。若宿主没有，插件自动降级为等价的内置样式，功能不受影响，控制台会打一条 INFO 说明原因。
 - 目标平台为 Windows；需要系统已安装 Chrome/Edge/Chromium/Brave/Opera 之一。原生 Firefox 无法被 Playwright 驱动，不在支持列表；macOS/Linux 未验证。
 - 严格 CSP 页面（`style-src` 禁内联样式）上高亮框的视觉效果会被浏览器拦截，但选择逻辑不受影响。
 - 同一 DSH 进程内多个 profile/实例同时运行本插件时，HTTP 路由存在占用冲突（后者注册失败并告警）。

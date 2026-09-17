@@ -38,8 +38,8 @@ export default defineConfig([
     dts: false,
   },
   // ---- client 半边：打包 TS → CJS，包裹在 loader 握手中 -------
-  // react 是浏览器模块表在运行时提供的平台模块；
-  // 其余所有内容由打包器内联。
+  // react 与 DSH UI 原语是浏览器模块表在运行时提供的平台模块（host 侧由
+  // package.json 的 dsh.client.external 排进 boot 图）；其余内容由打包器内联。
   {
     name: 'client',
     entry: { client: 'src/client/index.ts' },
@@ -47,7 +47,7 @@ export default defineConfig([
     format: ['cjs'],
     platform: 'browser',
     target: 'es2020',
-    external: ['react'],
+    external: ['react', 'react/jsx-runtime', 'react-dom', '@deepseek-ai/dsh-client-ui-primitives'],
     outExtension: () => ({ js: '.js' }),
     clean: false,
     sourcemap: false,

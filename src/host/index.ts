@@ -25,6 +25,7 @@
  * DEBUG 级生产默认关闭，设 `DSH_WE_DEBUG=1` 环境变量打开。
  */
 
+import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
 import type {
@@ -622,6 +623,75 @@ export function apply(ctx: Context): void {
   }
 
   /**
+   * 解析 npm 的脚本入口（npm-cli.js）——按 Node 安装布局自适应，跨平台。
+   *
+   * 为什么不用 PATH 上的 npm 启动：Windows 下它是 npm.cmd，spawn 受限；
+   * 统一以 `node <npm-cli.js>` 运行。而 npm-cli.js 的位置随安装方式而异：
+   *   - Windows 官方安装器 / nvm-windows：<nodeDir>/node_modules/npm/bin/npm-cli.js
+   *   - macOS / Linux（nvm、Homebrew、官方 pkg、发行版包）：
+   *     <prefix>/lib/node_modules/npm/bin/npm-cli.js（<prefix> 为 bin 的上级）
+   * 旧实现只推导 Windows 布局，在 macOS/Linux 上必然报「未找到 npm 的脚本入口」。
+   *
+   * 做法：从三种可执行文件路径反推同安装根下的候选（实际使用的 node →
+   * PATH 上的 npm，覆盖 Volta/asdf 等 shim 场景 → 承载本插件的 node 兜底），
+   * 逐一探测存在性，命中即返回；全部落空时抛出含候选清单的错误便于定位。
+   */
+  const resolveNpmCli = async (nodePath: string): Promise<string> => {
+    const candidates: string[] = []
+    const seen = new Set<string>()
+    /** 追加候选并去重（同一路径可能被多条来源推导出来）。 */
+    const push = (p: string): void => {
+      if (!p || seen.has(p)) return
+      seen.add(p)
+      candidates.push(p)
+    }
+    /** 由可执行文件路径（node 或 npm shim）推导其安装根下的 npm 脚本入口。 */
+    const pushFromExecutable = (exePath: string): void => {
+      if (!exePath) return
+      const binDir = dirname(exePath)
+      const prefix = dirname(binDir)
+      push(join(binDir, 'node_modules', 'npm', 'bin', 'npm-cli.js')) // Windows 官方安装器 / nvm-windows
+      push(join(prefix, 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js')) // macOS / Linux 标准布局
+      push(join(prefix, 'node_modules', 'npm', 'bin', 'npm-cli.js')) // 自定义 prefix / 少数发行版
+      push(join(binDir, 'npm-cli.js')) // 少数安装把入口直接放在 bin 目录
+    }
+    pushFromExecutable(nodePath)
+    try {
+      pushFromExecutable(await subprocess.resolveExecutable('npm'))
+    } catch {
+      logDebug('PATH 上未解析到 npm，跳过 shim 反推候选')
+    }
+    pushFromExecutable(process.execPath)
+    logDebug('npm 脚本入口候选 ' + candidates.length + ' 个: ' + candidates.join(' | '))
+
+    /**
+     * 候选存在性判定：优先用 subprocess 服务（真实可执行文件语义）；
+     * 失败再退回 fs.stat——npm-cli.js 只需作为 node 的脚本参数，
+     * 打包器可能不带可执行位，此时它同样可用。
+     */
+    const exists = async (p: string): Promise<boolean> => {
+      try {
+        await subprocess.resolveExecutable(p)
+        return true
+      } catch {
+        try {
+          const info = (await fs.stat(await fs.resolve(p))) as { isFile?: () => boolean } | null
+          return !!(info && (!info.isFile || info.isFile()))
+        } catch {
+          return false
+        }
+      }
+    }
+    for (const c of candidates) {
+      if (await exists(c)) {
+        logDebug('npm 脚本入口命中: ' + c)
+        return c
+      }
+    }
+    throw new Error('未找到 npm 的脚本入口（已尝试: ' + candidates.join(' | ') + '），请确认 Node.js 安装完整')
+  }
+
+  /**
    * 确保 helper 子进程已启动（单例）。
    * 已在运行直接复用；启动中复用同一 Promise，防止并发调用重复 spawn；
    * 启动失败写入 status 供 UI 轮询展示，并把异常抛回调用方。
@@ -640,19 +710,11 @@ export function apply(ctx: Context): void {
         const payloadText = res.helper + '\n<<<DSH_SPLIT>>>\n' + res.inspector + '\n<<<DSH_END>>>\n'
         const node = await subprocess.resolveExecutable('node')
         // npm 安装 playwright-core 运行时（首次数秒，无浏览器下载）后启动系统浏览器；
-        // 使用 npm-cli.js 脚本入口而不是 npm.cmd，避免 Windows 下 spawn .cmd 的限制
-        const npmCli = node.replace(/[^\\/]+$/, 'node_modules/npm/bin/npm-cli.js')
-        let launcher: string | null = null
-        try {
-          await subprocess.resolveExecutable(npmCli)
-          launcher = npmCli
-        } catch {
-          // 继续到下方的显式报错
-        }
-        if (!launcher) throw new Error('未找到 npm 的脚本入口（' + npmCli + '），请确认 Node.js 安装完整')
+        // 入口路径按安装布局自适应解析（见 resolveNpmCli），Windows 下也不 spawn .cmd
+        const launcher = await resolveNpmCli(node)
         const port = typeof webServer.port === 'number' && webServer.port > 0 ? webServer.port : 0
         if (port === 0) throw new Error('DSH web 服务器端口不可用')
-        logDebug('启动参数: node=' + node + ' npmCli=' + npmCli + ' webPort=' + port)
+        logDebug('启动参数: node=' + node + ' npmCli=' + launcher + ' webPort=' + port)
         const boot = subprocess.spawn({
           argv: [node, resourceDir + '/bootstrap.cjs', launcher, String(port)],
           cwd: workspaceRoot,

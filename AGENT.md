@@ -21,7 +21,7 @@ dsh-webpage-element-picker/  # DSH 组合包（bundle），单包，pnpm 管理
 │   │               #   primitives.ts 取 DSH 官方 Modal/Button；primitives-types.d.ts 声明其类型表面
 │   └── shared/     # host ↔ client 经 HTTP 交换的状态/事件形状（type-only）
 ├── resources/      # 运行时资源：bootstrap.cjs / browser-probe.cjs / helper-playwright.js / inspector.js
-│   └── test/       # 冒烟测试（driver + CSP 测试页 + 窗口可见性检查）
+│   └── test/       # 测试：check-env.cjs（跨平台环境自检）/ driver.cjs 冒烟驱动 + CSP 测试页
 ├── tsup.config.ts  # 双入口构建配置
 ├── cordis.patch.yml# bundle 配置层：插入 name: dsh-webpage-element-picker 行
 └── lib/            # 构建产物，不入库
@@ -38,6 +38,7 @@ dsh-webpage-element-picker/  # DSH 组合包（bundle），单包，pnpm 管理
 | `pnpm watch` | tsup 持续构建 |
 | `pnpm typecheck` | TypeScript 类型检查（`tsc --noEmit`） |
 | `pnpm test` | 同 `pnpm typecheck` |
+| `pnpm test:env` | 跨平台环境自检（npm 脚本入口解析 + 三平台浏览器候选表；不联网、不启动浏览器，需先 `pnpm build`） |
 | `pnpm dsh plugin --profile web add .` | 装入 DSH `web` profile（详见 README.md） |
 
 ## 注释
@@ -69,4 +70,4 @@ dsh-webpage-element-picker/  # DSH 组合包（bundle），单包，pnpm 管理
 - **Host 半** — Cordis 原生插件，`inject` 声明的服务就绪后运行；注册动态工具 `read_picked_element`、系统提示注入、HTTP 路由；目标 `es2022` ESM
 - **Client 半** — `window.__ModuleLoader__.load` 闭包工厂格式，`module.exports` 为插件表面；目标 `es2020`，external 为 `react` 与 `@deepseek-ai/dsh-client-ui-primitives`；对话框结构复用 DSH 官方 Modal/Button 原语，自有区块用 `--dsw-*` 令牌（浅/深色随 harness 自动切换）；原语缺失时按 `src/client/index.ts` 的 `renderDialogShell`/`renderButton` 降级
 - **浏览器驱动** — `playwright-core`（首次由 bootstrap 经 npm 安装到自有缓存，约 13MB，不下载浏览器）
-- **目标平台** — Windows；macOS/Linux 未验证
+- **目标平台** — Windows / macOS / Linux。两处平台相关逻辑必须保持自适应：npm 脚本入口按 Node 安装布局解析（`src/host/index.ts` 的 `resolveNpmCli`），浏览器候选按平台切换（`resources/browser-probe.cjs` 的 `browserDefs`）；改动后跑 `pnpm test:env` 校验，Linux 仅逻辑校验未实机验证

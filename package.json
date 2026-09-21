@@ -20,7 +20,8 @@
     "build": "tsup",
     "watch": "tsup --watch",
     "typecheck": "tsc --noEmit",
-    "test": "npm run typecheck"
+    "test": "npm run typecheck",
+    "test:env": "node resources/test/check-env.cjs"
   },
   "dsh": {
     "bundle": {

@@ -17,7 +17,7 @@ DSH（DeepSeek Harness）动态插件：在对话输入框工具行提供一个�
 
 ## 安装
 
-适用对象：DSH（本仓库部署形态）的 `web` profile。需要机器有 **Node.js（含 npm）**、到 npm 源的网络，以及系统已安装 **Chrome / Edge / Chromium / Brave / Opera 之一**（Windows）。
+适用对象：DSH（本仓库部署形态）的 `web` profile。需要机器有 **Node.js（含 npm）**、到 npm 源的网络，以及系统已安装 **Chrome / Edge / Chromium / Brave / Opera 之一**。支持 **Windows / macOS / Linux**：npm 脚本入口按 Node 安装布局自适应解析（Windows 官方安装器与 nvm-windows 的 `<nodeDir>/node_modules/npm`，macOS/Linux（nvm、Homebrew、官方 pkg、发行版包）的 `<prefix>/lib/node_modules/npm`，并覆盖 Volta/asdf 等 shim 与 PATH 反推）；浏览器候选按平台切换（Windows 注册表 + 安装目录，macOS `/Applications` 与 `~/Applications` 的 `.app`，Linux `/usr/bin`、`/opt`、`/snap/bin` 及 PATH）。
 
 ```sh
 dsh plugin --profile web add "github:zlei1989/dsh-webpage-element-picker#main"
@@ -32,7 +32,7 @@ pnpm install
 pnpm build        # tsup：src/host → lib/index.js（ESM），src/client → lib/client.js（loader 包裹）
 ```
 
-`pnpm watch` 可持续构建；`pnpm test` 跑 `tsc --noEmit` 类型检查。
+`pnpm watch` 可持续构建；`pnpm test` 跑 `tsc --noEmit` 类型检查，`pnpm test:env` 跑跨平台环境自检（npm 脚本入口解析 + 浏览器候选清单，不联网、不启动浏览器）。
 
 ### 长期安装：bundle + profile
 
@@ -93,7 +93,7 @@ src/
   shared/
     types.ts       # host ↔ client 经 HTTP 交换的状态/事件形状（type-only）
 resources/         # 运行时资源（四个文件：bootstrap.cjs / helper-playwright.js / inspector.js / browser-probe.cjs）
-  test/            # 冒烟测试（driver + CSP 测试页 + 窗口可见性检查）
+  test/            # 测试：check-env.cjs（跨平台环境自检，不联网）/ driver.cjs 冒烟驱动 + CSP 测试页
 tsup.config.ts     # 双入口构建：host→ESM，client→CJS+loader 包裹
 tsconfig.json
 cordis.patch.yml   # bundle 配置层：插入 name: dsh-webpage-element-picker 行
@@ -121,7 +121,7 @@ DSH Client(插件) ── conversation.input.left 图标 ── fetch /invoke �
 
 - bundle 形态跨 DSH 重启持久（`dsh.profile.bundles` 层）。
 - 对话框的原语复用要求宿主 DSH 在浏览器模块表里提供 `@deepseek-ai/dsh-client-ui-primitives`（带 UI 的常规 DSH 版本都有）。若宿主没有，插件自动降级为等价的内置样式，功能不受影响，控制台会打一条 INFO 说明原因。
-- 目标平台为 Windows；需要系统已安装 Chrome/Edge/Chromium/Brave/Opera 之一。原生 Firefox 无法被 Playwright 驱动，不在支持列表；macOS/Linux 未验证。
+- 支持 Windows / macOS / Linux；需要系统已安装 Chrome/Edge/Chromium/Brave/Opera 之一（候选位置按平台自动切换）。原生 Firefox 无法被 Playwright 驱动，不在支持列表。Windows 与 macOS 已跑通端到端冒烟测试（`resources/test/driver.cjs`），Linux 只做了候选清单与路径逻辑校验、未做实机验证。
 - 严格 CSP 页面（`style-src` 禁内联样式）上高亮框的视觉效果会被浏览器拦截，但选择逻辑不受影响。
 - 同一 DSH 进程内多个 profile/实例同时运行本插件时，HTTP 路由存在占用冲突（后者注册失败并告警）。
 - 首次打开需要联网安装 playwright-core 运行时（约 13MB，仅一次）；无网络或系统无浏览器时会给出明确报错。

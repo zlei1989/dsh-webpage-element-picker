@@ -1,8 +1,9 @@
 'use strict'
 // 冒烟测试驱动：模拟 DSH host 插件侧（/poll 长轮询 + /events 捕获），
 // 拉起真实 bootstrap.cjs 走完整链路——helper-ready 后自动打开 test-page.html
-// （CSP 测试页），经 test-drive.js 模拟用户点选元素，再依次验证窗口可见性
-// （check-windows.ps1）、status/reinject 命令，18s 后落盘 result.json 并杀树。
+// （CSP 测试页），经 test-drive.js 模拟用户点选元素，再验证窗口可见性
+// （Windows 用 check-windows.ps1；其他平台记录 skipped）、status/reinject
+// 命令，18s 后落盘 result.json 并杀树。
 // 用法: node driver.cjs <npm-cli.js 路径>；整体 300s 安全兜底，永不挂起。
 const { spawn, execSync } = require('child_process')
 const http = require('http')
@@ -14,6 +15,19 @@ const root = path.join(here, '..')
 const npmCli = process.argv[2]
 const out = { events: [], errors: [], exitCode: null }
 const log = (m) => { console.log('[driver] ' + m) }
+
+/**
+ * 窗口可见性检查：Windows 走 check-windows.ps1 查窗口标题；其他平台不做
+ * 像素级断言（避免触发 macOS 辅助功能授权，且部分沙箱禁止列举进程），
+ * 只记录 skipped——浏览器确实已启动由 helper-ready / injected /
+ * element-selected 事件与 profile 目录佐证。
+ */
+function checkWindowVisibility() {
+  if (process.platform === 'win32') {
+    return execSync('powershell -NoProfile -ExecutionPolicy Bypass -File "' + path.join(here, 'check-windows.ps1') + '"', { encoding: 'utf8', windowsHide: true, timeout: 15000 })
+  }
+  return 'skipped (non-Windows)：窗口可见性未做程序化断言（helper 固定 headless:false，窗口由系统显示）'
+}
 
 const payload =
   fs.readFileSync(path.join(root, 'helper-playwright.js'), 'utf8') +
@@ -61,8 +75,7 @@ const server = http.createServer((req, res) => {
           sendCommand({ id: 1, method: 'open', params: { url: 'file:///' + path.join(here, 'test-page.html').replace(/\\/g, '/') } })
           setTimeout(() => {
             try {
-              const w = execSync('powershell -NoProfile -ExecutionPolicy Bypass -File "' + path.join(here, 'check-windows.ps1') + '"', { encoding: 'utf8', windowsHide: true, timeout: 15000 })
-              out.windows = String(w).trim()
+              out.windows = String(checkWindowVisibility()).trim()
             } catch (e) {
               out.windows = 'window check failed: ' + String(e.message)
             }

@@ -31,8 +31,13 @@ export interface PrimitivesProbe {
 export function loadPrimitives(): PrimitivesProbe {
   try {
     const mod = require(PRIMITIVES_MODULE) as PrimitiveModule | undefined
-    // 只校验本插件真正要用的两个导出：模块表应答了不完整的表面时同样走降级
-    if (!mod || typeof mod.Modal !== 'function' || typeof mod.Button !== 'function') {
+    // 只校验本插件真正要用的两个导出：模块表应答了不完整的表面时同样走降级。
+    // 判据必须是"非空"而非 `typeof === 'function'`——React 组件不一定是函数：
+    // 官方 Button 由 `forwardRef(...)` 创建，typeof 为 'object'（运行中 bundle 实测
+    // `Button: React.forwardRef(function ({variant, size, icon, ...}) {...})`）。
+    // 早期按函数判定，导致 Button 恒被判为"缺失"、插件永远走内置降级样式，
+    // 官方 Modal/Button 一次都没被用上。
+    if (!mod || mod.Modal == null || mod.Button == null) {
       return { module: null, error: '模块表已应答但缺少 Modal/Button 导出' }
     }
     return { module: mod, error: '' }

@@ -33,7 +33,12 @@ export interface PrimitiveButtonProps extends ButtonHTMLAttributes<HTMLButtonEle
   icon?: ReactNode
 }
 
-/** 原语模块中本插件用到的两个组件。 */
+/**
+ * 原语模块中本插件用到的两个组件。
+ * 注意两者都只是"可渲染的组件值"而非必然为函数：官方 Button 是
+ * `forwardRef(...)` 的产物（typeof 'object'），所以 `primitives.ts` 的可用性
+ * 判据只能是非空，不能是 `typeof === 'function'`。
+ */
 export interface PrimitiveModule {
   Modal: (props: PrimitiveModalProps) => ReactNode
   Button: (props: PrimitiveButtonProps) => ReactNode

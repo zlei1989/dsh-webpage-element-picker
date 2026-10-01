@@ -15,6 +15,8 @@ export interface PickerStatus {
   browser?: string
   injected?: boolean
   modeExited?: boolean
+  /** helper 的 status 回执专用：没有可用窗口（主页面已关闭）时为 true，此时不带 state。 */
+  closed?: boolean
 }
 
 /**
@@ -64,6 +66,26 @@ export interface ContextItemSummary {
   pageUrl?: string
 }
 
+/**
+ * 系统探测到的一个可驱动浏览器（picker-browsers 返回）。
+ * 探测只做存在性检查（不启动浏览器、不要求 playwright-core 已安装），
+ * 真正的可启动性由 helper 启动时的无头验证兜底。
+ */
+export interface BrowserOption {
+  /** 规范名（Chrome/Edge/Chromium/Brave/Opera），同时用于 profile 目录与展示。 */
+  name: string
+  /** 可执行文件路径（同一浏览器的多个候选路径取首个存在的）。 */
+  path: string
+  /** 该可执行文件当前是否存在。 */
+  exists: boolean
+}
+
+/** 用户的浏览器选择（client 记忆在 localStorage，随导航请求回传 host）。 */
+export interface BrowserChoice {
+  name: string
+  path: string
+}
+
 /** /invoke 方法供浏览器 UI 调用的结果信封。 */
 export interface InvokeResult {
   ok: boolean
@@ -76,4 +98,10 @@ export interface InvokeResult {
   contextCount?: number
   /** picker-context-list 返回：上下文历史节点摘要列表（按选中先后排序）。 */
   items?: ContextItemSummary[]
+  /** picker-browsers 返回：系统探测到的浏览器清单（按优先级排序，含未安装项）。 */
+  browsers?: BrowserOption[]
+  /** picker-browsers 返回：当前 helper 实际使用的浏览器（未运行时为空）。 */
+  current?: BrowserChoice
+  /** picker-reinject 返回：浏览器当时没开着，已按传入网址先执行打开（再注入）时为 true。 */
+  reopened?: boolean
 }

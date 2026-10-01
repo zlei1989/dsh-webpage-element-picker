@@ -39,6 +39,8 @@ import type {
   WebServerFace,
 } from './services'
 import type {
+  BrowserChoice,
+  BrowserOption,
   ContextItemSummary,
   DomElementPayload,
   DomRegistryEntry,
@@ -57,6 +59,22 @@ export const inject = ['subprocess', 'webServer', 'sandboxPolicy', 'fs', 'tools'
 const LOG_PREFIX = '[dsh-webpage-element-picker]'
 /** DEBUG 级开关：生产默认关闭，环境变量 `DSH_WE_DEBUG=1` 打开。 */
 const DEBUG_ENABLED = typeof process !== 'undefined' && !!(process.env && process.env.DSH_WE_DEBUG)
+
+/**
+ * 浏览器清单探测（browser-probe.cjs --list）的单次上限。
+ * 不能按"探测本身很轻"来估：经 harness subprocess 服务起子进程要额外付
+ * runner（node + tsx）启动成本，probe 内部的 reg.exe 首次调用也要 ~1s；
+ * 宿主繁忙时（页面刚加载、正在跑 agent）实测会超过 20s。给足余量，
+ * 免得冷启动那一次就把下拉菜单打成"探测失败"。
+ */
+const BROWSER_PROBE_TIMEOUT_MS = 60000
+
+/**
+ * 浏览器清单探测结果的缓存有效期。系统装了哪些浏览器几乎不变，而菜单
+ * 每次展开都探测一次：缓存让重复展开秒开，同时几分钟后自动重探，
+ * 新装的浏览器仍能被发现。
+ */
+const BROWSER_LIST_TTL_MS = 5 * 60 * 1000
 
 /** DEBUG：分支走向、中间变量、循环关键节点（生产默认关闭）。 */
 function logDebug(msg: string): void {
@@ -92,6 +110,29 @@ interface RequestWaiter {
 
 type Handler = (params: Record<string, unknown>) => Promise<InvokeResult>
 
+/** 规范化结果：成功带最终网址，失败带错误文案。 */
+type UrlNormalization = { ok: true; url: string } | { ok: false; error: string }
+
+/**
+ * 规范化输入的网址：缺协议头时补 `https://`（跟浏览器地址栏一个习惯）。
+ * 与 client 半边的同名实现保持一致（两半是独立 bundle，共享不了运行时函数）：
+ * 已带 http/https 原样返回；其它协议头（ftp:/about:/mailto:）明确拒绝；
+ * `host:port` 不算协议头；只写一个斜杠的 http(s) 按同协议补齐 `//`。
+ * host 侧再做一次是兜底：client 传参异常/被绕过时，helper 的 open 也只会收到合法网址。
+ */
+function normalizeUrl(raw: string): UrlNormalization {
+  const url = String(raw || '').trim()
+  if (!url) return { ok: false, error: '请先输入网址' }
+  if (/^https?:\/\//i.test(url)) return { ok: true, url: url }
+  const scheme = url.match(/^([a-z][a-z0-9+.-]*):(?!\d)/i)
+  if (!scheme) return { ok: true, url: 'https://' + url }
+  const name = scheme[1].toLowerCase()
+  if (name === 'http' || name === 'https') {
+    return { ok: true, url: name + '://' + url.slice(scheme[0].length).replace(/^\/+/, '') }
+  }
+  return { ok: false, error: '只支持 http/https 网址（不支持 ' + name + ': 协议）' }
+}
+
 export function apply(ctx: Context): void {
   const subprocess = ctx.get('subprocess') as SubprocessFace
   const webServer = ctx.get('webServer') as WebServerFace
@@ -111,9 +152,19 @@ export function apply(ctx: Context): void {
   let status: PickerStatus = { state: 'idle', message: '浏览器未启动' }
   let lineBuf = ''
   let lastBrowserName = ''
+  /**
+   * 当前 helper 启动时使用的浏览器路径（空串表示按系统优先级自动探测）。
+   * 与本次请求的用户选择比较，决定是否需要重启 helper 换浏览器。
+   */
+  let helperBrowserPath = ''
 
   let domCounter = 0
   let domRegistry: DomRegistryEntry[] = []
+  /**
+   * 浏览器清单探测结果的短时缓存（见 BROWSER_LIST_TTL_MS）。
+   * 只缓存"探测成功"的清单：失败不写缓存，下次展开菜单立刻重试。
+   */
+  let browsersCache: { at: number; browsers: BrowserOption[] } | null = null
 
   // ---- 资源目录解析：包内 resources/ 优先（bundle 形态），家目录/工作区兜底 ----
 
@@ -692,14 +743,106 @@ export function apply(ctx: Context): void {
   }
 
   /**
+   * 跑一次性子进程并收集 stdout（browser-probe.cjs --list 用）。
+   * 与 discoverHome 同一模式：长驻进程才走 handle 单例，一次性调用用完即弃；
+   * 超时终止子进程并以错误拒绝，避免 UI 请求永挂。
+   */
+  const runCapture = (argv: string[], timeoutMs: number): Promise<string> => {
+    return new Promise<string>((resolve, reject) => {
+      let out = ''
+      let settled = false
+      let timerDisposer: (() => void) | null = null
+      const child = subprocess.spawn({
+        argv: argv,
+        cwd: workspaceRoot,
+        stdio: { stdin: 'ignore', stdout: 'pipe', stderr: 'ignore' },
+        graceMs: 3000,
+      })
+      const finish = (err: Error | null): void => {
+        if (settled) return
+        settled = true
+        if (timerDisposer) timerDisposer()
+        if (err) reject(err)
+        else resolve(out)
+      }
+      // stderr 忽略：probe 的日志噪音不需要回流；stdout 只承载协议行
+      ;(async () => {
+        try {
+          for await (const chunk of child.stdout) out += String(chunk)
+        } catch {
+          // stdout 提前结束：按已收集内容处理
+        }
+      })()
+      child.done.then(
+        (outcome) => finish(outcome.exitCode === 0 || out.length > 0 ? null : new Error('退出码 ' + outcome.exitCode)),
+        (err) => finish(new Error(String((err && (err as Error).message) || err))),
+      )
+      timerDisposer = timer.timeout(() => {
+        logWarn('一次性子进程超时（' + timeoutMs + 'ms），已终止: ' + argv.join(' '))
+        try {
+          child.terminate()
+        } catch {
+          // 进程可能已退出
+        }
+        finish(new Error('子进程超时 ' + timeoutMs + 'ms'))
+      }, timeoutMs)
+    })
+  }
+
+  /**
+   * 停掉当前 helper：先发 quit 让它自己关窗退出（先礼），超时或没反应再
+   * terminate（后兵），并等进程真正结束——用于切换浏览器时重建。
+   * 调用即置空 handle：新请求不会挂到正在退出的进程上。
+   */
+  const stopHelper = async (reason: string): Promise<void> => {
+    const boot = handle
+    if (boot === null) return
+    handle = null
+    helperBrowserPath = ''
+    logInfo('正在关闭内置浏览器（' + reason + '）')
+    // 在途请求立即失败：quit 之后不会再收到它们的 reply，等下去只会挂到超时
+    for (const [id, w] of Array.from(waiters)) {
+      waiters.delete(id)
+      w.reject(new Error('浏览器正在重启（' + reason + '）'))
+    }
+    // 命令走 HTTP 长轮询队列（不是 stdin——stdin 只用于启动载荷）
+    sendCommand({ id: ++cmdSeq, method: 'quit', params: {} })
+    // quit 会先 reply 再关窗退出；等进程结束（最多 8s）后兜底 terminate
+    await Promise.race([
+      boot.done.then(() => undefined, () => undefined),
+      new Promise<void>((resolve) => {
+        timer.timeout(resolve, 8000)
+      }),
+    ])
+    try {
+      boot.terminate()
+    } catch {
+      // 已退出
+    }
+    // 旧进程再也不会来取命令：丢弃队列残留（否则新 helper 会收到过期的 quit/open）
+    if (commandQueue.length > 0) {
+      logDebug('丢弃旧 helper 未取走的 ' + commandQueue.length + ' 条命令（切换浏览器前入队）')
+      commandQueue.length = 0
+    }
+  }
+
+  /**
    * 确保 helper 子进程已启动（单例）。
-   * 已在运行直接复用；启动中复用同一 Promise，防止并发调用重复 spawn；
+   * preferPath 是本次请求的用户选择（空串=自动探测）：
+   *   - 未指定浏览器（自动探测）或与当前一致：复用正在运行的 helper——
+   *     已在运行的窗口/登录态不因「改回自动」被无谓关掉；
+   *   - 明确指定了另一个浏览器：先关旧窗口再以新浏览器打开（用户的显式意图）。
+   * 启动中复用同一 Promise，防止并发调用重复 spawn；
    * 启动失败写入 status 供 UI 轮询展示，并把异常抛回调用方。
    */
-  const ensureHelper = async (): Promise<SubprocessHandleLike> => {
-    if (handle !== null) return handle
+  const ensureHelper = async (preferPath?: string): Promise<SubprocessHandleLike> => {
+    const prefer = String(preferPath || '').trim()
+    if (handle !== null) {
+      if (!prefer || prefer.toLowerCase() === helperBrowserPath.toLowerCase()) return handle
+      await stopHelper('切换浏览器')
+    }
     if (starting) {
-      logDebug('helper 正在启动中，复用进行中的启动 Promise')
+      logDebug('helper 正在启动中，复用进行中的启动 Promise（本次选择: ' + (prefer || '自动探测') + '）')
       return starting
     }
     starting = (async (): Promise<SubprocessHandleLike> => {
@@ -714,31 +857,39 @@ export function apply(ctx: Context): void {
         const launcher = await resolveNpmCli(node)
         const port = typeof webServer.port === 'number' && webServer.port > 0 ? webServer.port : 0
         if (port === 0) throw new Error('DSH web 服务器端口不可用')
-        logDebug('启动参数: node=' + node + ' npmCli=' + launcher + ' webPort=' + port)
+        logDebug('启动参数: node=' + node + ' npmCli=' + launcher + ' webPort=' + port + ' browser=' + (prefer || '(自动探测)'))
+        // argv[4] = 用户选定的浏览器路径（可空）：bootstrap 转成 probe 的 --prefer
+        const bootArgv = [node, resourceDir + '/bootstrap.cjs', launcher, String(port)]
+        if (prefer) bootArgv.push(prefer)
         const boot = subprocess.spawn({
-          argv: [node, resourceDir + '/bootstrap.cjs', launcher, String(port)],
+          argv: bootArgv,
           cwd: workspaceRoot,
           stdio: { stdin: 'pipe', stdout: 'pipe', stderr: { maxBytes: 65536 } },
           graceMs: 3000,
         })
         handle = boot
+        helperBrowserPath = prefer
         payloadSent = false
         lineBuf = ''
         logInfo('helper 子进程已启动（耗时 ' + (Date.now() - startedAt) + 'ms，后续 READY 握手与浏览器探测由 bootstrap 驱动）')
         boot.done.then((outcome) => {
-          if (handle === boot) {
-            handle = null
-            const tail = stderrTail(boot)
-            const detail = '浏览器进程已退出 (code ' + outcome.exitCode + ')' + (tail ? ' · ' + tail : '')
-            // 退出码 0 多为用户正常关窗（INFO）；非零为异常退出（WARN，可重新打开）
-            if (outcome.exitCode === 0) logInfo(detail)
-            else logWarn(detail)
-            status = { state: 'closed', message: detail }
-            // 进程已死：所有等待 reply 的请求立即失败，避免挂到超时
-            for (const [id, w] of Array.from(waiters)) {
-              waiters.delete(id)
-              w.reject(new Error('浏览器进程已退出'))
-            }
+          // 已被换浏览器的替换流程接管：旧进程的退出不再改写状态
+          if (handle !== boot) {
+            logDebug('旧 helper 进程退出（已被替换，忽略其退出码对状态的影响）')
+            return
+          }
+          handle = null
+          helperBrowserPath = ''
+          const tail = stderrTail(boot)
+          const detail = '浏览器进程已退出 (code ' + outcome.exitCode + ')' + (tail ? ' · ' + tail : '')
+          // 退出码 0 多为用户正常关窗（INFO）；非零为异常退出（WARN，可重新打开）
+          if (outcome.exitCode === 0) logInfo(detail)
+          else logWarn(detail)
+          status = { state: 'closed', message: detail }
+          // 进程已死：所有等待 reply 的请求立即失败，避免挂到超时
+          for (const [id, w] of Array.from(waiters)) {
+            waiters.delete(id)
+            w.reject(new Error('浏览器进程已退出'))
           }
         }, () => {})
         readStdout(boot, payloadText)
@@ -780,21 +931,44 @@ export function apply(ctx: Context): void {
   }
 
   /**
+   * 从 /invoke 参数里解析用户的浏览器选择（client 从 localStorage 记忆里带上来）。
+   * 只认 { name?, path } 且 path 为非空字符串的形态；不合法一律当"未选择"（自动探测），
+   * 避免 UI 传参异常时反而让打开失败。
+   */
+  const parseBrowserChoice = (raw: unknown): string => {
+    if (!raw || typeof raw !== 'object') return ''
+    const path = (raw as { path?: unknown }).path
+    return typeof path === 'string' ? path.trim() : ''
+  }
+
+  /**
    * picker-navigate：把内嵌浏览器导航到指定网址。
-   * 校验协议 → 确保 helper 已启动 → 发 open 命令；首次使用需安装
-   * playwright-core 运行时 + 探测系统浏览器（约 10-30 秒），超时放宽到 120s。
+   * 规范化（缺协议头补 https://）→ 确保 helper 已启动（按 args.browser 选择浏览器，
+   * 换浏览器会先关掉旧窗口）→ 发 open 命令；首次使用需安装 playwright-core 运行时
+   * + 探测系统浏览器（约 10-30 秒），超时放宽到 120s。
    */
   const pickerNavigate: Handler = async (args) => {
-    const url = String((args && args.url) || '')
-    if (!/^https?:\/\//i.test(url)) {
-      logDebug('网址校验未通过（需 http/https）: ' + url)
-      return { ok: false, error: '网址需以 http:// 或 https:// 开头' }
+    const norm = normalizeUrl(String((args && args.url) || ''))
+    if (!norm.ok) {
+      logDebug('网址校验未通过: ' + norm.error)
+      return { ok: false, error: norm.error }
     }
+    const url = norm.url
+    const preferPath = parseBrowserChoice(args && args.browser)
+    if (preferPath) logInfo('用户选择浏览器: ' + preferPath)
     try {
-      await ensureHelper()
+      await ensureHelper(preferPath)
       const r = await request('open', { url: url }, 120000)
+      // 带上实际使用的浏览器名：UI 用它判断「所选浏览器不可用已回退」并更新提示
       return r && r.ok
-        ? { ok: true, status: Object.assign({ state: 'open' as const }, r.status || { url: url }) }
+        ? {
+            ok: true,
+            status: Object.assign(
+              { state: 'open' as const },
+              lastBrowserName ? { browser: lastBrowserName } : {},
+              r.status || { url: url },
+            ),
+          }
         : { ok: false, error: (r && r.error) || '打开失败' }
     } catch (err) {
       logError('打开网址失败: ' + url, err)
@@ -803,12 +977,79 @@ export function apply(ctx: Context): void {
   }
 
   /**
+   * picker-browsers：探测系统已安装的 Chromium 系浏览器（供「打开」按钮右侧
+   * 下拉菜单选择）。跑 browser-probe.cjs 的清单模式——只做存在性检查，不启动
+   * 浏览器、不要求 playwright-core 已装，因此打开菜单只需百毫秒级；
+   * 真正能不能被驱动由 helper 启动时的无头验证兜底（不可用会回退自动探测）。
+   */
+  const pickerBrowsers: Handler = async () => {
+    const startedAt = Date.now()
+    const current: BrowserChoice | undefined = helperBrowserPath
+      ? { name: lastBrowserName || 'Browser', path: helperBrowserPath }
+      : undefined
+    // 缓存命中直接返回：current（正在运行的浏览器）每次都现算，只有系统清单走缓存
+    if (browsersCache && Date.now() - browsersCache.at < BROWSER_LIST_TTL_MS) {
+      logDebug('浏览器清单缓存命中（' + Math.round((Date.now() - browsersCache.at) / 1000) + 's 前探测）')
+      return { ok: true, browsers: browsersCache.browsers, current: current }
+    }
+    let browsers: BrowserOption[] = []
+    try {
+      const resourceDir = await resolveResourceDir()
+      const node = await subprocess.resolveExecutable('node')
+      const out = await runCapture([node, resourceDir + '/browser-probe.cjs', '--list'], BROWSER_PROBE_TIMEOUT_MS)
+      const line = String(out).split('\n').map((s) => s.trim()).filter(Boolean).pop() || ''
+      const parsed = JSON.parse(line) as BrowserOption[]
+      if (!Array.isArray(parsed)) throw new Error('探测结果不是数组: ' + line.slice(0, 200))
+      browsers = parsed.filter((b) => b && typeof b.path === 'string' && b.path)
+      browsersCache = { at: Date.now(), browsers: browsers }
+      logInfo('浏览器清单探测完成（' + browsers.filter((b) => b.exists).length + ' 个可用 / ' + browsers.length + ' 个候选，耗时 ' + (Date.now() - startedAt) + 'ms）')
+    } catch (err) {
+      logError('浏览器清单探测失败（下拉菜单将只显示错误提示）', err)
+      return { ok: false, error: String((err && (err as Error).message) || err) }
+    }
+    return { ok: true, browsers: browsers, current: current }
+  }
+
+  /**
    * picker-reinject：在当前页面仅重新注入选择功能（不重新导航），
    * 用于登录等人工操作后恢复选择模式。
+   * 浏览器没开着时（helper 没起/窗口被关/还停在 about:blank 空页）不再报
+   * "no window" 了事：带着输入框里的网址先执行打开（helper 的 open 本身
+   * 就会在加载后注入），并用 reopened 标记告知 UI 走的是这条路。
    */
-  const pickerReinject: Handler = async () => {
+  const pickerReinject: Handler = async (args) => {
+    const url = String((args && args.url) || '')
+    const preferPath = parseBrowserChoice(args && args.browser)
     try {
-      await ensureHelper()
+      // 已在运行的 helper 不因浏览器选择不同而重启：仅重新注入不该动当前窗口；
+      // 尚未启动时才用用户选择（与「打开」一致）
+      await ensureHelper(handle === null ? preferPath : '')
+      const st = await request('status', {}, 8000).catch(() => null)
+      const cur = st && st.ok ? st.status : undefined
+      // 「没开着」的判据：无窗口（closed）、无 URL、或仅剩 about:blank 空页
+      const noPage = !cur || cur.closed === true || !cur.url || /^about:blank$/i.test(cur.url)
+      if (noPage) {
+        // 兜底打开的网址同样先规范化：只填 `example.com` 也能开
+        const norm = normalizeUrl(url)
+        if (!norm.ok) {
+          logDebug('浏览器未打开且网址不可用: ' + norm.error)
+          // 没填网址与填了不支持的协议要分开说，别把后者含糊成"请先输入网址"
+          return { ok: false, error: url ? norm.error : '内置浏览器未打开，请先输入网址（或点「打开」）' }
+        }
+        logInfo('浏览器未打开（' + String((cur && cur.url) || '无窗口') + '），先打开再注入: ' + norm.url)
+        const r = await request('open', { url: norm.url }, 120000)
+        return r && r.ok
+          ? {
+              ok: true,
+              reopened: true,
+              status: Object.assign(
+                { state: 'open' as const },
+                lastBrowserName ? { browser: lastBrowserName } : {},
+                r.status || { url: norm.url },
+              ),
+            }
+          : { ok: false, error: (r && r.error) || '打开失败' }
+      }
       const r = await request('reinject', {}, 15000)
       return r && r.ok
         ? { ok: true, status: Object.assign({ state: 'open' as const }, r.status || {}) }
@@ -892,6 +1133,7 @@ export function apply(ctx: Context): void {
   }
 
   handlers.set('picker-navigate', pickerNavigate)
+  handlers.set('picker-browsers', pickerBrowsers)
   handlers.set('picker-reinject', pickerReinject)
   handlers.set('picker-status', pickerStatus)
   handlers.set('picker-close', pickerClose)

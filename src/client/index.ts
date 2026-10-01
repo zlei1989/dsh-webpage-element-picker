@@ -27,10 +27,19 @@ import { React, h } from './react'
 import { PRIMITIVES } from './primitives'
 import type { ClientCtx, PickerEntryProps } from './services'
 import type { PrimitiveButtonProps, PrimitiveModalProps } from './primitives-types'
-import type { ContextItemSummary, InvokeResult, PendingElement, PickerStatus } from '../shared/types'
+import type {
+  BrowserChoice,
+  BrowserOption,
+  ContextItemSummary,
+  InvokeResult,
+  PendingElement,
+  PickerStatus,
+} from '../shared/types'
 
 const PLUGIN_ID = 'dsh-webpage-element-picker'
 const INVOKE_PATH = '/dsh-webpage-element-picker/invoke'
+/** localStorage 键：记住下拉菜单里选定的浏览器（值为 { name, path } 的 JSON）。 */
+const BROWSER_STORAGE_KEY = 'dsh-webpage-element-picker.browser'
 
 /** 日志统一前缀（DevTools 控制台检索用）。 */
 const LOG_PREFIX = '[dsh-webpage-element-picker]'
@@ -55,21 +64,27 @@ type NoticeTone = 'info' | 'error'
 
 /**
  * 渲染按钮：优先 DSH Button 原语；原语不可用时降级为等价样式的原生按钮。
- * 降级分支只影响观感，点击/禁用语义与官方组件保持一致。
+ * 降级分支只影响观感，点击/禁用语义与官方组件保持一致；className / icon /
+ * aria-* 一并透传——拆分按钮（打开 + 下拉箭头）靠它区分左右两半。
  */
 function renderButton(props: PrimitiveButtonProps): React.ReactNode {
   const el = h
   if (PRIMITIVES.module) return el(PRIMITIVES.module.Button, props)
   const primary = props.variant === 'primary'
+  const className = (primary ? 'dsh-we-btnPrimary' : 'dsh-we-btnOutline') + (props.className ? ' ' + props.className : '')
   return el(
     'button',
     {
       type: 'button',
-      className: primary ? 'dsh-we-btnPrimary' : 'dsh-we-btnOutline',
+      className: className,
       onClick: props.onClick,
       disabled: props.disabled,
       title: props.title,
+      'aria-haspopup': props['aria-haspopup'],
+      'aria-expanded': props['aria-expanded'],
+      'aria-label': props['aria-label'],
     },
+    props.icon != null ? el('span', { className: 'dsh-we-btnIcon' }, props.icon) : null,
     props.children,
   )
 }
@@ -127,7 +142,9 @@ const STYLE_CSS =
   '.dsh-we-panel { position: relative; z-index: 1; display: flex; flex-direction: column; gap: 20px; width: min(380px, 100%); padding: 0 0 24px; overflow: hidden; border: 0; border-radius: 24px; background: var(--dsw-alias-bg-layer-2); box-shadow: var(--dsw-elevation-prominent); color: var(--dsw-alias-label-primary); font-family: var(--dsw-font-family); }' +
   '.dsh-we-panelBody { display: flex; flex-direction: column; gap: 20px; }' +
   // ---- 卡片几何：宽度放宽以容纳网址输入框与提示文案 ----
-  '.dsh-we-dialog.dsh-we-dialog { width: min(560px, 100%); gap: 0; }' +
+  // 底边比原语的 24px 收 4px：按钮本身有视觉重量，底边与左右同为 24px 时会显松，
+  // 20px 让四周留白看起来齐平（left/right 仍由卡片几何给出 24px）
+  '.dsh-we-dialog.dsh-we-dialog { width: min(560px, 100%); gap: 0; padding-bottom: 20px; }' +
   // ---- 原语不可用时的头部/关闭按钮与按钮降级（原语可用时不会渲染） ----
   '.dsh-we-fallbackHeader { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 22px 14px 12px 24px; }' +
   '.dsh-we-fallbackTitle { margin: 0; font-size: 16px; line-height: 24px; font-weight: 500; color: var(--dsw-alias-label-primary); }' +
@@ -139,6 +156,7 @@ const STYLE_CSS =
   '.dsh-we-btnPrimary { border: none; background: var(--dsw-alias-button-primary-fill); color: var(--dsw-alias-label-primary-foreground); }' +
   '.dsh-we-btnPrimary:hover:not(:disabled) { background: var(--dsw-alias-button-primary-hover); }' +
   '.dsh-we-btnOutline:disabled, .dsh-we-btnPrimary:disabled { opacity: 0.4; cursor: not-allowed; }' +
+  '.dsh-we-btnIcon { display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; }' +
   // ---- 正文区块 ----
   '.dsh-we-body { display: flex; flex-direction: column; gap: 10px; padding: 0 24px; }' +
   '.dsh-we-input { box-sizing: border-box; width: 100%; min-height: 92px; padding: 12px 14px; border: 0.5px solid var(--dsw-alias-border-l4); border-radius: 16px; background: var(--dsw-alias-bg-layer-1); color: var(--dsw-alias-label-primary); font-family: var(--dsw-font-family); font-size: 14px; line-height: 22px; resize: vertical; outline: none; transition: border-color 120ms ease, box-shadow 120ms ease; }' +
@@ -150,7 +168,12 @@ const STYLE_CSS =
   '.dsh-we-noticeInfo { color: var(--dsw-alias-state-warn-label); }' +
   '.dsh-we-noticeError { color: var(--dsw-alias-state-error-primary); }' +
   // ---- 底部栏：左侧上下文计数（悬浮展开历史菜单），右侧操作按钮 ----
-  '.dsh-we-footer { display: flex; align-items: center; gap: 8px; justify-content: space-between; margin-top: 20px; padding: 16px 24px 0; border-top: 0.5px solid var(--dsw-alias-border-l1); }' +
+  // 与正文区块的间距由 .dsh-we-panelBody 的 20px gap 提供，这里不再叠 margin-top：
+  // 之前 gap + margin-top 叠成 40px，分隔线上方空得比下方多，底部显窄
+  '.dsh-we-footer { display: flex; align-items: center; gap: 8px; justify-content: space-between; padding: 16px 24px 0; border-top: 0.5px solid var(--dsw-alias-border-l1); }' +
+  // 原语 Modal 的 .body 自带 24px 左右内边距（fallback 卡片没有）：自有区块不再叠加，
+  // 否则左右 48px、底边只有卡片的 24px，四周留白失衡（"底部边缘太窄"就是这么来的）
+  '.dsh-we-dialogPrimitive .dsh-we-body, .dsh-we-dialogPrimitive .dsh-we-footer { padding-left: 0; padding-right: 0; }' +
   '.dsh-we-footerLeft { position: relative; display: flex; align-items: center; }' +
   '.dsh-we-footerRight { display: flex; align-items: center; gap: 8px; }' +
   '.dsh-we-ctxCount { padding: 4px 8px; border-radius: 8px; color: var(--dsw-alias-label-secondary); font-size: 13px; line-height: 20px; cursor: default; user-select: none; }' +
@@ -166,13 +189,28 @@ const STYLE_CSS =
   '.dsh-we-menuItemId { flex-shrink: 0; color: var(--dsw-alias-state-business-primary); font-size: 12px; line-height: 18px; }' +
   '.dsh-we-menuItemLabel { overflow: hidden; color: var(--dsw-alias-label-primary); font-size: 12px; line-height: 18px; text-overflow: ellipsis; white-space: nowrap; }' +
   '.dsh-we-menuEmpty { padding: 12px 10px; color: var(--dsw-alias-label-caption); font-size: 12px; line-height: 18px; text-align: center; }' +
+  // 探测失败时的就地重试按钮（菜单空态的出口）
+  '.dsh-we-menuRetry { display: block; margin: 8px auto 0; padding: 4px 12px; border: 0.5px solid var(--dsw-alias-border-l3); border-radius: 12px; background: transparent; color: var(--dsw-alias-label-primary); font-family: inherit; font-size: 12px; line-height: 18px; cursor: pointer; }' +
+  '.dsh-we-menuRetry:hover { background: var(--dsw-alias-interactive-bg-hover); }' +
   '.dsh-we-menuFooter { display: flex; justify-content: flex-end; padding: 6px 10px; border-top: 0.5px solid var(--dsw-alias-border-l1); }' +
+  // ---- 浏览器下拉菜单（挂在「打开」拆分按钮上，右对齐向上弹出）----
+  // 复用历史菜单的外观，只加右对齐、勾选列
+  '.dsh-we-menuRight { left: auto; right: 0; width: 240px; }' +
+  '.dsh-we-menuItemCheck { flex: none; width: 12px; color: var(--dsw-alias-state-business-primary); font-size: 12px; line-height: 18px; }' +
+  '.dsh-we-menuItemActive .dsh-we-menuItemLabel { font-weight: 500; }' +
+  // ---- 「打开」拆分按钮：左半打开、右半展开浏览器菜单 ----
+  // 双类选择器压过原语 Button 的 CSS Module 圆角（与 .dsh-we-dialog 同一手法）；
+  // 右半用对话框底色画一条分隔线，示意这是两个可点击区域
+  '.dsh-we-split { position: relative; display: inline-flex; align-items: stretch; }' +
+  '.dsh-we-splitMain.dsh-we-splitMain { border-top-right-radius: 0; border-bottom-right-radius: 0; }' +
+  '.dsh-we-splitArrow.dsh-we-splitArrow { border-top-left-radius: 0; border-bottom-left-radius: 0; border-left: 0.5px solid var(--dsw-alias-bg-layer-2); padding: 0 8px; }' +
+  '.dsh-we-splitArrow.dsh-we-splitArrow.dsh-we-splitArrowOpen { background: var(--dsw-alias-button-primary-hover); }' +
   // ---- 输入框工具行的十字图标按钮（本轮不改动其尺寸，仅令牌化配色） ----
   '.dsh-we-iconBtn { display: inline-flex; align-items: center; justify-content: center; padding: 5px; border: none; border-radius: 6px; background: transparent; color: var(--dsw-alias-label-secondary); cursor: pointer; }' +
   '.dsh-we-iconBtn:hover { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }' +
   '.dsh-we-iconBtn:disabled { opacity: 0.4; cursor: default; }' +
   // ---- 键盘可达性：焦点环与按钮一致，动效跟随系统减少动效偏好 ----
-  '.dsh-we-iconBtn:focus-visible, .dsh-we-input:focus-visible, .dsh-we-fallbackClose:focus-visible { outline: 2px solid var(--dsw-alias-button-primary-fill); outline-offset: 2px; }' +
+  '.dsh-we-iconBtn:focus-visible, .dsh-we-input:focus-visible, .dsh-we-fallbackClose:focus-visible, .dsh-we-menuItem:focus-visible, .dsh-we-splitArrow:focus-visible { outline: 2px solid var(--dsw-alias-button-primary-fill); outline-offset: 2px; }' +
   '@media (prefers-reduced-motion: reduce) { .dsh-we-input { transition: none; } }'
 
 /**
@@ -197,6 +235,63 @@ function hostCall(method: string, params?: Record<string, unknown>): Promise<Inv
     if (cost > 500) logInfo('host 调用 ' + method + ' 耗时 ' + cost + 'ms')
     return value
   })
+}
+
+/**
+ * 读取 localStorage 里记住的浏览器选择。
+ * 值形如 {"name":"Edge","path":"C:\\…\\msedge.exe"}；缺失、损坏或浏览器禁用
+ * 存储（隐私模式）时一律返回 null（=自动探测），只记 DEBUG 不影响使用。
+ */
+function readStoredBrowser(): BrowserChoice | null {
+  try {
+    const raw = window.localStorage.getItem(BROWSER_STORAGE_KEY)
+    if (!raw) return null
+    const parsed = JSON.parse(raw) as { name?: unknown; path?: unknown }
+    const path = typeof parsed.path === 'string' ? parsed.path.trim() : ''
+    if (!path) return null
+    const name = typeof parsed.name === 'string' && parsed.name ? parsed.name : 'Browser'
+    logDebug('已恢复记住的浏览器: ' + name + '（' + path + '）')
+    return { name: name, path: path }
+  } catch (err) {
+    logDebug('读取 localStorage 中的浏览器选择失败（按未选择处理）: ' + String((err && (err as Error).message) || err))
+    return null
+  }
+}
+
+/** 记住浏览器选择；choice 为 null 表示改回「自动探测」（删除记录，不留死值）。 */
+function storeBrowser(choice: BrowserChoice | null): void {
+  try {
+    if (choice) window.localStorage.setItem(BROWSER_STORAGE_KEY, JSON.stringify(choice))
+    else window.localStorage.removeItem(BROWSER_STORAGE_KEY)
+  } catch (err) {
+    // 存储不可用不影响本次会话内的选择（仅下次打开对话框时丢失）
+    logDebug('写入 localStorage 失败（选择仅在本次会话内有效）: ' + String((err && (err as Error).message) || err))
+  }
+}
+
+/** 规范化结果：成功带最终网址，失败带可直接展示给用户的文案。 */
+type UrlNormalization = { ok: true; url: string } | { ok: false; error: string }
+
+/**
+ * 规范化输入的网址：缺协议头时补 `https://`（跟浏览器地址栏一个习惯）。
+ * 规则（host 半边有一份等价实现做兜底，两边保持一致）：
+ *   - 已带 http/https：原样返回；
+ *   - 带其它协议头（ftp://、about:、mailto:）：明确拒绝，不拼成 `https://ftp://…` 这种怪东西；
+ *   - `host:port` 不算协议头（localhost:3080、127.0.0.1:8000）——冒号后是数字，按缺头补 https；
+ *   - 只写了一个斜杠的 http(s)（`http:/x`、`https:x`）：按同协议补齐 `//`。
+ */
+function normalizeUrl(raw: string): UrlNormalization {
+  const url = String(raw || '').trim()
+  if (!url) return { ok: false, error: '请先输入网址' }
+  if (/^https?:\/\//i.test(url)) return { ok: true, url: url }
+  // 形如 `name:` 且冒号后不是数字才算协议头（`(?!\d)` 把 localhost:3080 排除在外）
+  const scheme = url.match(/^([a-z][a-z0-9+.-]*):(?!\d)/i)
+  if (!scheme) return { ok: true, url: 'https://' + url }
+  const name = scheme[1].toLowerCase()
+  if (name === 'http' || name === 'https') {
+    return { ok: true, url: name + '://' + url.slice(scheme[0].length).replace(/^\/+/, '') }
+  }
+  return { ok: false, error: '只支持 http/https 网址（不支持 ' + name + ': 协议）' }
 }
 
 /** 折叠所有空白为单空格并截断为最长 10 字，用作占位符里的短标签。 */
@@ -253,6 +348,18 @@ function crosshairIcon(el: typeof h): React.ReactNode {
   )
 }
 
+/** 下拉箭头 SVG（「打开」拆分按钮右半的内容）。 */
+function chevronDownIcon(el: typeof h): React.ReactNode {
+  return el(
+    'svg',
+    {
+      width: 14, height: 14, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor',
+      strokeWidth: 2.5, strokeLinecap: 'round', strokeLinejoin: 'round',
+    },
+    el('polyline', { points: '6 9 12 15 18 9' }),
+  )
+}
+
 /**
  * 槽位组件主体：十字图标按钮 + 「添加页面元素」对话框。
  * 对话框负责网址输入与状态展示；轮询 host 拉取新选中元素并插入草稿。
@@ -297,6 +404,22 @@ function PickerEntry(props: PickerEntryProps): React.ReactNode {
   const clearArmedState = React.useState(false)
   const clearArmed = clearArmedState[0]
   const setClearArmed = clearArmedState[1]
+  // 浏览器选择：choice 从 localStorage 恢复并随「打开」回传 host；菜单展开时
+  // 拉一次系统探测清单（host 跑 browser-probe.cjs --list，只做存在性检查）
+  const browserChoiceState = React.useState<BrowserChoice | null>(readStoredBrowser)
+  const browserChoice = browserChoiceState[0]
+  const setBrowserChoice = browserChoiceState[1]
+  const browserMenuState = React.useState(false)
+  const browserMenuOpen = browserMenuState[0]
+  const setBrowserMenuOpen = browserMenuState[1]
+  const browserListState = React.useState<{ status: 'idle' | 'loading' | 'error' | 'stale'; error: string; items: BrowserOption[]; current: BrowserChoice | null }>(
+    function () { return { status: 'idle', error: '', items: [], current: null } },
+  )
+  const browserList = browserListState[0]
+  const setBrowserList = browserListState[1]
+  // 拆分按钮容器 ref：判断"点在按钮组/菜单之外"以收起菜单
+  const splitRef = React.useRef<HTMLDivElement | null>(null)
+  const splitRefCb = function (node: HTMLDivElement | null): void { splitRef.current = node }
   const statusState = status ? status.state : null
 
   /** 显示一条通知，5 秒后自动清除（仅当内容未被后续通知覆盖时）。 */
@@ -343,6 +466,65 @@ function PickerEntry(props: PickerEntryProps): React.ReactNode {
       .catch(function (err) {
         logDebug('picker-context-list 失败（菜单保留旧数据）: ' + String((err && err.message) || err))
       })
+  }
+
+  /**
+   * 拉取系统探测到的浏览器清单（host 侧跑 browser-probe.cjs --list：只做存在性
+   * 检查，不启动浏览器、不要求已装 playwright-core，因此展开菜单即可刷新）。
+   * 失败/超时在菜单里就地提示，不影响已记住的选择；HTTP 404 是特例——
+   * client 半边会随构建热更、host 半边不会，所以 404 基本就是"宿主还没重启"，
+   * 单独标记为 stale 给出可操作的提示，而不是甩一个裸错误码。
+   */
+  const loadBrowsers = function (): void {
+    setBrowserList(function (cur) { return { status: 'loading', error: '', items: cur.items, current: cur.current } })
+    hostCall('picker-browsers', {})
+      .then(function (res) {
+        if (res && res.ok) {
+          setBrowserList({ status: 'idle', error: '', items: res.browsers || [], current: res.current || null })
+        } else {
+          setBrowserList(function (cur) { return { status: 'error', error: (res && res.error) || '未知错误', items: cur.items, current: cur.current } })
+        }
+      })
+      .catch(function (err) {
+        const message = String((err && err.message) || err)
+        logDebug('picker-browsers 失败（菜单显示错误提示）: ' + message)
+        const stale = message.indexOf('404') >= 0
+        setBrowserList(function (cur) {
+          return { status: stale ? 'stale' : 'error', error: message, items: cur.items, current: cur.current }
+        })
+      })
+  }
+
+  /**
+   * 点击拆分按钮右半：开合浏览器菜单。展开时探测一次系统浏览器
+   * （探测很轻，但没必要在对话框打开时就跑）。
+   */
+  const toggleBrowserMenu = function (): void {
+    if (browserMenuOpen) {
+      setBrowserMenuOpen(false)
+      return
+    }
+    setBrowserMenuOpen(true)
+    logDebug('展开浏览器菜单，开始探测系统浏览器')
+    loadBrowsers()
+  }
+
+  /**
+   * 选定浏览器：写入 localStorage（下次打开对话框仍是这个选择），并随「打开」
+   * 回传 host；choice 为 null 表示「自动探测」，删除存储记录。选择在下次点
+   * 「打开」时生效——换浏览器会先关掉当前窗口再以新浏览器打开。
+   */
+  const selectBrowser = function (choice: BrowserChoice | null): void {
+    setBrowserChoice(choice)
+    storeBrowser(choice)
+    setBrowserMenuOpen(false)
+    if (choice) {
+      logInfo('用户选择浏览器: ' + choice.name + '（' + choice.path + '）')
+      showNotice('已记住浏览器 ' + choice.name + '，点「打开」时使用')
+    } else {
+      logInfo('用户改回自动探测浏览器')
+      showNotice('已改回自动探测（按 Chrome > Edge > Chromium > Brave > Opera 优先级）')
+    }
   }
 
   /**
@@ -448,6 +630,30 @@ function PickerEntry(props: PickerEntryProps): React.ReactNode {
     }
   }, [])
 
+  // 浏览器菜单的收起：点按钮组/菜单之外收起；Esc 在**捕获**阶段先收起菜单。
+  // 原语 Modal 的 Esc 是 document 上的冒泡监听（useModalLayer），捕获先于冒泡，
+  // 因此这里的 preventDefault + stopPropagation 能把 Esc 留给菜单，不关掉整个对话框。
+  React.useEffect(function () {
+    if (!browserMenuOpen) return
+    const onPointerDown = function (e: MouseEvent): void {
+      const target = e.target as Node | null
+      if (splitRef.current && target && splitRef.current.contains(target)) return
+      setBrowserMenuOpen(false)
+    }
+    const onKeyDown = function (e: KeyboardEvent): void {
+      if (e.key !== 'Escape') return
+      e.preventDefault()
+      e.stopPropagation()
+      setBrowserMenuOpen(false)
+    }
+    document.addEventListener('mousedown', onPointerDown, true)
+    document.addEventListener('keydown', onKeyDown, true)
+    return function () {
+      document.removeEventListener('mousedown', onPointerDown, true)
+      document.removeEventListener('keydown', onKeyDown, true)
+    }
+  }, [browserMenuOpen])
+
   // 轮询 host 的 picker-pull：对话框打开期间或浏览器处于 open 状态时，
   // 每 1.5s 拉取一次新选中元素与最新状态
   React.useEffect(function () {
@@ -472,26 +678,53 @@ function PickerEntry(props: PickerEntryProps): React.ReactNode {
     }
   }, [open, statusState])
 
-  /** 事件处理「打开」：取第一行网址 → 协议校验 → 调 picker-navigate。 */
+  /**
+   * 取输入框里第一个非空行作为目标网址（提示文案已说明"每行一个，使用第一行"）；
+   * 「打开」与「仅重新注入」在浏览器没开着时的兜底打开共用这一份解析。
+   */
+  const firstUrlLine = function (): string {
+    return String(urlText || '').split('\n').map(function (s) { return s.trim() }).filter(Boolean)[0] || ''
+  }
+
+  /**
+   * 事件处理「打开」：取第一行网址 → 补协议头/校验 → 调 picker-navigate。
+   * 记住的浏览器选择随请求回传（未选择则不带 browser，host 按系统优先级探测）；
+   * host 因所选浏览器不可用而回退时，返回的实际浏览器名与之不符——就地提示。
+   */
   const onConfirm = function (): void {
-    // 多行输入只取第一个非空行（提示文案已说明"每行一个，使用第一行"）
-    const url = String(urlText || '').split('\n').map(function (s) { return s.trim() }).filter(Boolean)[0] || ''
-    if (!url) {
-      showNotice('请先输入网址', 'error')
+    const norm = normalizeUrl(firstUrlLine())
+    if (!norm.ok) {
+      logDebug('网址校验未通过: ' + norm.error)
+      showNotice(norm.error, 'error')
       return
     }
-    if (!/^https?:\/\//i.test(url)) {
-      logDebug('网址校验未通过（需 http/https）: ' + url)
-      showNotice('网址需以 http:// 或 https:// 开头', 'error')
-      return
+    const url = norm.url
+    // 补过协议头的网址回写输入框（保留其余行）：用户看到的就是实际会打开的那个
+    const lines = String(urlText || '').split('\n')
+    const firstAt = lines.findIndex(function (s) { return !!s.trim() })
+    if (firstAt >= 0 && lines[firstAt] !== url) {
+      lines[firstAt] = url
+      setUrlText(lines.join('\n'))
     }
-    logInfo('用户请求打开网址: ' + url)
+    logInfo('用户请求打开网址: ' + url + (browserChoice ? '（浏览器: ' + browserChoice.name + '）' : '（浏览器: 自动探测）'))
     setBusy(true)
-    hostCall('picker-navigate', { url: url })
+    // 记住的浏览器选择随请求回传：host 以它启动/切换浏览器，未选择时按系统优先级探测
+    const params: Record<string, unknown> = { url: url }
+    if (browserChoice) params.browser = browserChoice
+    hostCall('picker-navigate', params)
       .then(function (res) {
         if (res && res.ok) {
-          setStatus(Object.assign({ state: 'open' as const }, res.status || { url: url }))
-          setOpen(false)
+          const nextStatus: PickerStatus = Object.assign({ state: 'open' as const }, res.status || { url: url })
+          setStatus(nextStatus)
+          // 所选浏览器不可用时 host 会回退自动探测（返回的实际浏览器名与选择不符）：
+          // 这种情况故意不关对话框——顺利打开就自动关闭的话，这条通知一闪即逝看不见
+          const used = nextStatus.browser || ''
+          if (browserChoice && used && used.toLowerCase() !== browserChoice.name.toLowerCase()) {
+            logDebug('所用浏览器与选择不一致: 选择 ' + browserChoice.name + '，实际 ' + used)
+            showNotice('所选浏览器 ' + browserChoice.name + ' 不可用，已改用 ' + used, 'error')
+          } else {
+            setOpen(false)
+          }
         } else {
           showNotice('打开失败：' + ((res && res.error) || '未知错误'), 'error')
         }
@@ -506,14 +739,23 @@ function PickerEntry(props: PickerEntryProps): React.ReactNode {
   }
 
   /** 事件处理「仅重新注入」：不重新导航，在当前页面恢复选择功能（登录后场景）。 */
+  /**
+   * 事件处理「仅重新注入」：不重新导航，在当前页面恢复选择功能（登录后场景）。
+   * 浏览器没开着时把输入框里的网址一并交给 host——它会先执行打开（加载后注入）
+   * 再回执 reopened，此处据此换一条通知文案（不会静默什么都不发生）。
+   */
   const onReinject = function (): void {
-    logInfo('用户请求重新注入选择功能')
+    const url = firstUrlLine()
+    logInfo('用户请求重新注入选择功能（兜底网址: ' + (url || '无') + '）')
     setBusy(true)
-    hostCall('picker-reinject', {})
+    const params: Record<string, unknown> = { url: url }
+    if (browserChoice) params.browser = browserChoice
+    hostCall('picker-reinject', params)
       .then(function (res) {
         if (res && res.ok) {
-          setStatus(Object.assign({ state: 'open' as const }, res.status || status))
-          showNotice('已重新注入选择功能')
+          const nextStatus: PickerStatus = Object.assign({ state: 'open' as const }, res.status || status)
+          setStatus(nextStatus)
+          showNotice(res.reopened ? '浏览器未打开，已先打开该网址并注入选择功能' : '已重新注入选择功能')
         } else {
           showNotice('重新注入失败：' + ((res && res.error) || '未知错误'), 'error')
         }
@@ -538,6 +780,9 @@ function PickerEntry(props: PickerEntryProps): React.ReactNode {
     : ''
   const buttonTitle = tooltip || '打开浏览器并选择页面元素'
 
+  /** 「打开」按钮与菜单里展示的浏览器选择文案（未选择 = 自动探测）。 */
+  const browserChoiceLabel = browserChoice ? browserChoice.name : '自动探测'
+
   /** 对话框中的状态行文案（原语 Modal 不可用时兜底卡片与它在同一层）。 */
   const statusLine = status
     ? '状态：' +
@@ -549,6 +794,79 @@ function PickerEntry(props: PickerEntryProps): React.ReactNode {
             ? '浏览器已就绪'
             : status.state))
     : ''
+
+  /**
+   * 渲染浏览器菜单的一行：左列勾选标记（选中态），右列浏览器名；
+   * 正在运行的浏览器额外标注「运行中」，鼠标悬浮显示可执行文件路径。
+   */
+  const renderBrowserOption = function (option: BrowserOption | null, running: boolean): React.ReactNode {
+    const selected = option
+      ? !!browserChoice && browserChoice.path.toLowerCase() === option.path.toLowerCase()
+      : !browserChoice
+    const name = option ? option.name : '自动探测'
+    const detail = option ? (option.exists ? '' : '（未检测到）') : '（系统优先级）'
+    const choice: BrowserChoice | null = option ? { name: option.name, path: option.path } : null
+    return el(
+      'button',
+      {
+        key: option ? option.path : '__auto__',
+        type: 'button',
+        role: 'menuitem',
+        className: 'dsh-we-menuItem' + (selected ? ' dsh-we-menuItemActive' : ''),
+        title: option ? option.path : '按系统优先级自动探测（不使用记住的选择）',
+        onClick: function () { selectBrowser(choice) },
+      },
+      el('span', { className: 'dsh-we-menuItemCheck', 'aria-hidden': 'true' }, selected ? '✓' : ''),
+      el('span', { className: 'dsh-we-menuItemLabel' }, name + detail + (running ? '（运行中）' : '')),
+    )
+  }
+
+  /**
+   * 渲染浏览器下拉菜单（「打开」拆分按钮右半，点击箭头展开，向上弹出）：
+   * 第一行始终是「自动探测」，其余是 host 探测到的系统浏览器（只列已安装的，
+   * 正在运行的那个标注「运行中」）。探测没成功时仍保留「自动探测」这一行
+   * （好在宿主缺能力/未重启时也能把记住的选择清掉），只是列表位置给出原因。
+   */
+  const renderBrowserMenu = function (): React.ReactNode {
+    const installed = browserList.items.filter(function (b) { return b.exists })
+    const currentPath = browserList.current ? browserList.current.path.toLowerCase() : ''
+    // 空列表时的原因：宿主未重启 / 探测报错 / 真的一个都没装
+    const emptyReason = browserList.status === 'stale'
+      ? '浏览器列表需要重启 dsh web 后才可用'
+      : browserList.status === 'error'
+        ? '探测失败：' + browserList.error
+        : '未检测到 Chrome/Edge/Chromium/Brave/Opera'
+    return el(
+      'div',
+      { className: 'dsh-we-menu dsh-we-menuRight', role: 'menu', 'aria-label': '选择浏览器' },
+      el('div', { className: 'dsh-we-menuHeader' }, '选择浏览器（点「打开」时使用）'),
+      browserList.status === 'loading' && !browserList.items.length
+        ? el('div', { className: 'dsh-we-menuEmpty' }, '正在探测系统浏览器…')
+        : el(
+            'div',
+            { className: 'dsh-we-menuList' },
+            renderBrowserOption(null, false),
+            installed.length
+              ? installed.map(function (b) {
+                  return renderBrowserOption(b, !!currentPath && b.path.toLowerCase() === currentPath)
+                })
+              : el(
+                  'div',
+                  { className: 'dsh-we-menuEmpty' },
+                  emptyReason,
+                  // 探测失败/宿主未重启时给一条就地重试的出口：否则菜单只剩「自动探测」
+                  // 一行，用户只能关掉重开对话框碰运气（冷启动超时就是这么被撞上的）
+                  browserList.status === 'error' || browserList.status === 'stale'
+                    ? el(
+                        'button',
+                        { type: 'button', className: 'dsh-we-menuRetry', onClick: loadBrowsers },
+                        '重试探测',
+                      )
+                    : null,
+                ),
+          ),
+    )
+  }
 
   /**
    * 渲染上下文历史节点悬浮菜单（footer 左下角「上下文：N 项」悬停时出现，
@@ -607,7 +925,7 @@ function PickerEntry(props: PickerEntryProps): React.ReactNode {
         value: urlText,
         onChange: function (e: React.ChangeEvent<HTMLTextAreaElement>) { setUrlText(e.target.value) },
         rows: 3,
-        placeholder: '输入网址（每行一个，使用第一行），例如：\nhttps://example.com',
+        placeholder: '输入网址（每行一个，使用第一行；不带 http/https 会自动补 https://），例如：\nhttps://example.com',
         'aria-label': '网址',
         className: 'dsh-we-input',
       }),
@@ -618,14 +936,48 @@ function PickerEntry(props: PickerEntryProps): React.ReactNode {
       el(
         'div',
         { className: 'dsh-we-hint' },
-        '提示：在页面中点击元素，再点「添加到对话」，即可在输入框插入 [标签][DOMn] 引用式占位符；完整元素信息由模型按需通过 read_picked_element 工具读取。浏览器使用系统已安装的 Chrome/Edge 等（自动探测，绝不下载）；首次打开需安装约 13MB 的 playwright-core 运行时（不含浏览器）并探测系统浏览器，之后秒开。需要登录时：先点页面右下角的「选择模式」悬浮按钮（或按 ` 键）暂停选择，登录完成后回到这里点「仅重新注入」即可在当前页面恢复选择功能；如需回到输入的网址则点「打开」。',
+        '提示：在页面中点击元素，再点「添加到对话」，即可在输入框插入 [标签][DOMn] 引用式占位符；完整元素信息由模型按需通过 read_picked_element 工具读取。浏览器使用系统已安装的 Chrome/Edge 等（默认自动探测，绝不下载），点「打开」右侧箭头可指定用哪个浏览器（换浏览器会先关掉当前窗口）；首次打开需安装约 13MB 的 playwright-core 运行时（不含浏览器）并探测系统浏览器，之后秒开。需要登录时：先点页面右下角的「选择模式」悬浮按钮（或按 ` 键）暂停选择，登录完成后回到这里点「仅重新注入」即可在当前页面恢复选择功能；如需回到输入的网址则点「打开」。',
       ),
     )
   }
 
   /**
-   * 渲染对话框底部栏：左侧上下文计数（悬浮历史菜单），右侧关闭/重注入/打开。
-   * 按钮一律使用 DSH Button 原语（outline + primary），间距由其自带的 8px gap 提供。
+   * 渲染「打开」拆分按钮：左半按记住的浏览器打开网址，右半（箭头）展开浏览器
+   * 菜单。两半共用 primary 视觉，内圆角置零后拼成一个按钮；菜单在按钮组内部
+   * 渲染（绝对定位向上弹出），因此容器 ref 同时覆盖按钮与菜单，用于判断外点关闭。
+   */
+  const renderOpenButton = function (): React.ReactNode {
+    return el(
+      'div',
+      { className: 'dsh-we-split', ref: splitRefCb },
+      renderButton({
+        variant: 'primary',
+        className: 'dsh-we-splitMain',
+        onClick: onConfirm,
+        disabled: busy,
+        title: '使用' + browserChoiceLabel + '打开输入的网址',
+        children: busy ? '打开中…' : '打开',
+      }),
+      renderButton({
+        variant: 'primary',
+        className: 'dsh-we-splitArrow' + (browserMenuOpen ? ' dsh-we-splitArrowOpen' : ''),
+        onClick: toggleBrowserMenu,
+        disabled: busy,
+        title: '选择浏览器（当前：' + browserChoiceLabel + '）',
+        'aria-haspopup': 'menu',
+        'aria-expanded': browserMenuOpen,
+        'aria-label': '选择浏览器',
+        icon: chevronDownIcon(el),
+      }),
+      browserMenuOpen ? renderBrowserMenu() : null,
+    )
+  }
+
+  /**
+   * 渲染对话框底部栏：左侧上下文计数（悬浮历史菜单），右侧重注入/打开（拆分
+   * 按钮：打开 + 浏览器下拉）。按钮一律使用 DSH Button 原语（outline + primary），
+   * 间距由其自带的 8px gap 提供。
+   * 不设「关闭」按钮：右上角的 × 与 Esc/点遮罩都能关闭，底部重复一个关闭键徒增噪音。
    */
   const renderDialogFooter = function (): React.ReactNode {
     return el(
@@ -652,10 +1004,9 @@ function PickerEntry(props: PickerEntryProps): React.ReactNode {
       el(
         'div',
         { className: 'dsh-we-footerRight' },
-        // 尺寸取原语默认的 md（36px 胶囊，r18）：与 DSH 对话框底部按钮同规格
-        renderButton({ variant: 'outline', onClick: function () { setOpen(false) }, children: '关闭' }),
+        // 尺寸取原语默认的 md（36px 胶囊）：与 DSH 对话框底部按钮同规格
         renderButton({ variant: 'outline', onClick: onReinject, disabled: busy, children: '仅重新注入' }),
-        renderButton({ variant: 'primary', onClick: onConfirm, disabled: busy, children: busy ? '打开中…' : '打开' }),
+        renderOpenButton(),
       ),
     )
   }
@@ -667,7 +1018,7 @@ function PickerEntry(props: PickerEntryProps): React.ReactNode {
       title: '添加页面元素',
       closeLabel: '关闭',
       onClose: function () { setOpen(false) },
-      className: 'dsh-we-dialog',
+      className: 'dsh-we-dialog' + (PRIMITIVES.module ? ' dsh-we-dialogPrimitive' : ''),
       // 正文与底部栏包在同一个弹性列里：卡片 gap 置 0 后由这个容器统一排版，
       // 原语可用与否都由 .dsh-we-panelBody 给出同一套 20px 节奏
       children: el('div', { className: 'dsh-we-panelBody' }, renderDialogBody(), renderDialogFooter()),

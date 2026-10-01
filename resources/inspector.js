@@ -29,7 +29,7 @@
   lb.setAttribute('data-dsh-we', 'lb')
   setStyle(lb, { position: 'fixed', pointerEvents: 'none', zIndex: '2147483640', backgroundColor: '#3b82f6', color: '#fff', fontSize: '11px', fontFamily: 'monospace', padding: '2px 6px', borderRadius: '3px', whiteSpace: 'nowrap', display: 'none' })
 
-  /* ---- 操作栏（点选后出现：添加到对话 / 取消） ---- */
+  /* ---- 操作栏（点选后出现：添加到对话 / 选择父节点 / 取消） ---- */
   var ab = document.createElement('div')
   ab.setAttribute('data-dsh-we', 'ab')
   setStyle(ab, { position: 'fixed', zIndex: '2147483642', background: '#1e1e1e', borderRadius: '6px', display: 'none', flexDirection: 'row', alignItems: 'center', gap: '4px', padding: '4px 6px', boxShadow: '0 2px 8px rgba(0,0,0,0.5)' })
@@ -37,10 +37,15 @@
   btnAdd.setAttribute('data-dsh-we-add', '1')
   setStyle(btnAdd, { background: '#2d2d2d', color: '#fff', fontSize: '12px', border: 'none', borderRadius: '4px', padding: '4px 10px', cursor: 'pointer', whiteSpace: 'nowrap' })
   btnAdd.textContent = '添加到对话'
+  var btnParent = document.createElement('button')
+  btnParent.setAttribute('data-dsh-we-parent', '1')
+  setStyle(btnParent, { background: '#2d2d2d', color: '#fff', fontSize: '12px', border: 'none', borderRadius: '4px', padding: '4px 10px', cursor: 'pointer', whiteSpace: 'nowrap' })
+  btnParent.textContent = '选择父节点'
   var btnCancel = document.createElement('button')
   setStyle(btnCancel, { background: '#2d2d2d', color: '#fff', fontSize: '12px', border: 'none', borderRadius: '4px', padding: '4px 10px', cursor: 'pointer', whiteSpace: 'nowrap' })
   btnCancel.textContent = '取消'
   ab.appendChild(btnAdd)
+  ab.appendChild(btnParent)
   ab.appendChild(btnCancel)
 
   /* ---- 暂停/恢复悬浮按钮（右下角常驻入口） ---- */
@@ -66,6 +71,7 @@
    * 生成元素的 CSS 选择器：有 id 直接用 #id；否则沿父链向上最多 5 层，
    * 每段拼 tag.class1.class2（过滤下划线开头的工具类名），同标签兄弟
    * 多于 1 个时补 :nth-child 消歧，遇带 id 祖先即收敛。
+   * 父链走不动时（元素本身就是 body/html）退回裸标签名——否则会回传空选择器。
    */
   function cSel(el) {
     if (el.id) return '#' + CSS.escape(el.id)
@@ -85,7 +91,7 @@
       ps.unshift(sg)
       nd = nd.parentElement
     }
-    return ps.join(' > ')
+    return ps.join(' > ') || el.tagName.toLowerCase()
   }
 
   /**
@@ -196,6 +202,26 @@
     positionAb(el.getBoundingClientRect())
   }
 
+  /**
+   * 「选择父节点」的目标：当前锁定元素的父元素；父元素不存在或是 <html> 时返回 null
+   * （再往上就是文档本身，没有可引用的上下文）。
+   */
+  function parentTarget() {
+    if (!selEl) return null
+    var p = selEl.parentElement
+    if (!p || p.tagName === 'HTML') return null
+    return p
+  }
+
+  /** 同步「选择父节点」按钮状态：还能上移就可用，已到顶层则置灰并写明原因。 */
+  function syncParentBtn() {
+    var p = parentTarget()
+    btnParent.disabled = !p
+    btnParent.style.opacity = p ? '1' : '0.45'
+    btnParent.style.cursor = p ? 'pointer' : 'not-allowed'
+    btnParent.title = p ? '把选择框移到父节点 <' + p.tagName.toLowerCase() + '>' : '已到最顶层'
+  }
+
   /** 点选锁定：覆盖层换成橙色边框定格在选中元素上，隐藏悬停标签。 */
   function lockOverlay(el) {
     var r = el.getBoundingClientRect()
@@ -248,6 +274,7 @@
       logDebug('选中元素: <' + selData.tagName + '> ' + selData.cssSelector)
       lockOverlay(target)
       showAb(target)
+      syncParentBtn()
     } else {
       returnToHover()
     }
@@ -341,16 +368,33 @@
     exitMode()
   })
 
+  /**
+   * 「选择父节点」：把锁定目标换成当前元素的父元素，重新采集数据并把锁定框/
+   * 操作栏移到父元素上（可连点，一路向上到 <body> 为止）；此后点「添加到对话」
+   * 回传的就是父节点的上下文。
+   */
+  btnParent.addEventListener('click', function (e) {
+    e.stopPropagation()
+    var p = parentTarget()
+    if (!p) return
+    selEl = p
+    selData = collectData(p)
+    logDebug('上移到父节点: <' + selData.tagName + '> ' + selData.cssSelector)
+    lockOverlay(p)
+    showAb(p)
+    syncParentBtn()
+  })
+
   /** 「取消」：放弃当前选中，回到悬停态。 */
   btnCancel.addEventListener('click', function (e) {
     e.stopPropagation()
     returnToHover()
   })
 
-  /* ---- 操作栏按钮的悬浮样式 ---- */
-  ;[btnAdd, btnCancel].forEach(function (b) {
-    b.addEventListener('mouseenter', function () { b.style.background = '#3d3d3d' })
-    b.addEventListener('mouseleave', function () { b.style.background = '#2d2d2d' })
+  /* ---- 操作栏按钮的悬浮样式（禁用态不改背景） ---- */
+  ;[btnAdd, btnParent, btnCancel].forEach(function (b) {
+    b.addEventListener('mouseenter', function () { if (!b.disabled) b.style.background = '#3d3d3d' })
+    b.addEventListener('mouseleave', function () { if (!b.disabled) b.style.background = '#2d2d2d' })
   })
 
   /* ---- 首次运行提示（每会话一次，3 秒淡出） ---- */
@@ -359,7 +403,7 @@
       sessionStorage.setItem('__dsh_we_hint__', '1')
       var th = document.createElement('div')
       setStyle(th, { position: 'fixed', bottom: '64px', left: '50%', transform: 'translateX(-50%)', zIndex: '2147483643', background: 'rgba(30,30,30,0.92)', color: '#fff', fontSize: '12px', fontFamily: 'system-ui,sans-serif', padding: '7px 16px', borderRadius: '20px', pointerEvents: 'none', whiteSpace: 'nowrap', boxShadow: '0 2px 8px rgba(0,0,0,0.45)', transition: 'opacity 0.4s' })
-      th.textContent = '🔍 页面元素选择已开启 · 点击元素后点「添加到对话」 · 按 ` 暂停'
+      th.textContent = '🔍 页面元素选择已开启 · 点「添加到对话」交给模型 · 层级不对可点「选择父节点」上移 · 按 ` 暂停'
       document.documentElement.appendChild(th)
       setTimeout(function () { th.style.opacity = '0' }, 2600)
       setTimeout(function () { if (th.parentNode) th.parentNode.removeChild(th) }, 3000)

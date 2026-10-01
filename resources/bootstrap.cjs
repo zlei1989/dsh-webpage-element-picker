@@ -6,6 +6,7 @@
 //           → 写入 %TEMP%\dsh-webpage-element-picker → 安装 playwright-core → 探测浏览器 → 启动 helper
 // argv[2] = npm cli 脚本入口（<nodeDir>/node_modules/npm/bin/npm-cli.js）
 // argv[3] = DSH web 服务器端口
+// argv[4] = 用户在插件 UI 里选定的浏览器可执行文件路径（可选；缺省按系统优先级自动探测）
 // 日志约定：stdout 只保留给协议行（'READY'）；日志一律走 stderr 并带级别
 //           前缀（host 侧按 64KB 环形收集，进程退出时取尾行诊断）。
 //           DEBUG 级默认关闭，DSH_WE_DEBUG=1 打开（会随 env 透传给 probe/helper）。
@@ -39,6 +40,8 @@ function logError(msg, err) {
 
 const npmCli = process.argv[2]
 const port = process.argv[3]
+/** 用户显式选择的浏览器路径（可空）：非空时探测优先验证它，失败自动回退。 */
+const preferredBrowser = String(process.argv[4] || '').trim()
 if (!npmCli) {
   logError('missing npm cli script argument (argv[2])')
   process.exit(2)
@@ -118,8 +121,9 @@ async function start(helperCode, inspectorCode) {
   try { fs.rmSync(path.join(dir, 'browser-probe.cjs'), { force: true }) } catch (err) { logDebug('清理遗留 browser-probe.cjs 失败（可忽略）') }
 
   await ensurePlaywright()
-  const browser = await probeBrowser()
-  logInfo('使用浏览器 ' + browser.name + '（' + browser.path + '）')
+  const browser = await probeBrowser(preferredBrowser)
+  logInfo('使用浏览器 ' + browser.name + '（' + browser.path + '）'
+    + (preferredBrowser ? '，用户在 UI 中指定' : ''))
   spawnHelper(browser)
 }
 
@@ -157,17 +161,24 @@ async function ensurePlaywright() {
 /**
  * 探测系统已安装的 Chromium 系浏览器：跑 browser-probe.cjs 子进程，
  * 解析其 stdout 最后一行 JSON（{ name, path }）；探测失败/结果无效均抛错。
+ * preferPath 非空时以 --prefer 传入：探测优先无头验证用户选定的浏览器，
+ * 不可用时自动回退到系统优先级探测（用户选择不会让启动直接失败）。
  */
-async function probeBrowser() {
+async function probeBrowser(preferPath) {
   const probePath = path.join(__dirname, 'browser-probe.cjs')
   if (!fs.existsSync(probePath)) {
     throw new Error('资源目录缺少 browser-probe.cjs（请与 bootstrap.cjs 一起部署）')
+  }
+  const argv = [process.execPath, probePath, dir]
+  if (preferPath) {
+    argv.push('--prefer', preferPath)
+    logInfo('按用户选择优先验证浏览器: ' + preferPath)
   }
   logInfo('正在探测系统浏览器…')
   const startedAt = Date.now()
   let r
   try {
-    r = await runAndWait([process.execPath, probePath, dir], { cwd: dir, env: env }, 180000)
+    r = await runAndWait(argv, { cwd: dir, env: env }, 180000)
   } catch (err) {
     throw new Error('浏览器探测失败: ' + String((err && err.message) || err))
   }
@@ -175,7 +186,8 @@ async function probeBrowser() {
   let info = null
   try { info = JSON.parse(line) } catch (err) {}
   if (!info || !info.path) throw new Error('浏览器探测结果无效: ' + line)
-  logInfo('浏览器探测完成（' + info.name + '，耗时 ' + (Date.now() - startedAt) + 'ms' + (info.cached ? '，缓存命中' : '') + '）')
+  const origin = info.preferred ? '，用户指定' : info.cached ? '，缓存命中' : ''
+  logInfo('浏览器探测完成（' + info.name + '，耗时 ' + (Date.now() - startedAt) + 'ms' + origin + '）')
   return info
 }
 

@@ -1,8 +1,15 @@
 'use strict'
 // 探测系统已安装的 Chromium 系浏览器（优先级：Chrome > Edge > Chromium > Brave > Opera）
-// 用法: node browser-probe.cjs <stateDir> [--list]
-//   成功: stdout 输出一行 JSON { name, path, cached? }，exit 0
-//   失败: stderr 输出原因，exit 1
+// 用法: node browser-probe.cjs [stateDir] [--list] [--prefer <exePath>]
+//   默认（验证模式）:
+//     成功: stdout 输出一行 JSON { name, path, cached? | preferred? }，exit 0
+//     失败: stderr 输出原因，exit 1
+//   --list（清单模式）: 只按存在性列出探测到的浏览器（不启动浏览器、不需要
+//     playwright-core 已安装），stdout 输出一行 JSON 数组
+//     [{ name, path, exists }]，exit 0——供插件 UI 的浏览器下拉菜单使用。
+//   --prefer <exePath>: 用户在 UI 里显式选择的浏览器路径，优先无头验证它；
+//     验证失败则回退自动探测（绝不下载任何浏览器）。
+// stateDir 省略时用默认缓存目录（与 bootstrap.cjs 落盘位置一致）。
 // 候选来源按平台切换：win32 注册表 App Paths + 安装目录；darwin /Applications
 // 与 ~/Applications 下的 .app；linux /usr/bin、/opt、/snap/bin（另加 PATH 兜底）。
 // 绝不下载任何浏览器：只用 playwright-core 启动"已存在"的可执行文件做无头验证。
@@ -13,7 +20,15 @@ const os = require('os')
 const path = require('path')
 const cp = require('child_process')
 
-const stateDirArg = process.argv[2]
+// ---- 参数解析：[stateDir] [--list] [--prefer <path>] 任意顺序 ----
+const args = process.argv.slice(2)
+const listOnly = args.includes('--list')
+const preferAt = args.indexOf('--prefer')
+const preferPath = preferAt >= 0 ? String(args[preferAt + 1] || '').trim() : ''
+/** --prefer 的取值也是裸参数，取第一个裸参数作 stateDir 时必须跳过它。 */
+const preferValueAt = preferAt >= 0 ? preferAt + 1 : -1
+const stateDir = args.filter((a, i) => !a.startsWith('--') && i !== preferValueAt)[0]
+  || path.join(os.tmpdir(), 'dsh-webpage-element-picker')
 
 const DEBUG = process.env.DSH_WE_DEBUG === '1'
 /** DEBUG：分支走向、候选清单等中间变量（生产默认关闭）。 */
@@ -198,6 +213,77 @@ function candidateList(opts) {
   return out
 }
 
+// ---- 按浏览器名归并候选（清单模式与首选验证共用）----
+/**
+ * 把候选清单按浏览器名归并成「每浏览器一条」：同名候选里优先取第一个存在的
+ * 路径（不存在则退回第一条候选路径并标记 exists=false）。
+ * 供 UI 下拉菜单展示（一个浏览器一行）与 --prefer 的路径→名称反查使用。
+ */
+function groupedCandidates() {
+  const groups = []
+  const byName = new Map()
+  for (const c of candidateList()) {
+    let g = byName.get(c.name)
+    if (!g) {
+      g = { name: c.name, paths: [] }
+      byName.set(c.name, g)
+      groups.push(g)
+    }
+    if (!g.paths.includes(c.path)) g.paths.push(c.path)
+  }
+  return groups.map((g) => {
+    const found = g.paths.filter((p) => fs.existsSync(p))[0]
+    return { name: g.name, path: found || g.paths[0], exists: !!found }
+  })
+}
+
+/** 由可执行文件路径反查浏览器名（命中候选清单则用清单里的规范名，否则退回文件名）。 */
+function nameForPath(exePath) {
+  const target = String(exePath).toLowerCase()
+  const hit = groupedCandidates().filter((c) => c.path.toLowerCase() === target)[0]
+  return hit ? hit.name : (path.basename(exePath, path.extname(exePath)) || 'Browser')
+}
+
+/** Windows 路径比较（大小写不敏感）。 */
+function samePath(a, b) {
+  return String(a || '').toLowerCase() === String(b || '').toLowerCase()
+}
+
+// ---- 探测缓存（browser-config.json）：auto / preferred 两槽互不污染 ----
+const configFile = path.join(stateDir, 'browser-config.json')
+
+/**
+ * 读缓存并归一化为 { auto?, preferred? } 两槽。
+ * 兼容旧格式（顶层 { name, path } 单槽）——按自动探测槽处理，避免升级后重复验证。
+ */
+function readCache() {
+  let raw = null
+  try {
+    raw = JSON.parse(fs.readFileSync(configFile, 'utf8'))
+  } catch (err) {
+    logDebug('浏览器缓存不可用（首次或已损坏），重新探测')
+    return {}
+  }
+  if (!raw || typeof raw !== 'object') return {}
+  const cache = {}
+  if (raw.auto && raw.auto.path) cache.auto = raw.auto
+  else if (raw.path) cache.auto = { name: raw.name, path: raw.path, probedAt: raw.probedAt }
+  if (raw.preferred && raw.preferred.path) cache.preferred = raw.preferred
+  return cache
+}
+
+/**
+ * 写入一个缓存槽（保留另一槽）：用户显式选择写 preferred，自动探测写 auto——
+ * 显式选择不会顶掉自动探测结果，用户改回「自动」时仍按系统优先级探测。
+ */
+function writeCache(patch) {
+  const next = Object.assign(readCache(), patch)
+  try {
+    fs.writeFileSync(configFile, JSON.stringify(next))
+  } catch (err) {
+    logWarn('浏览器缓存写入失败（下次启动需重新无头验证，可继续）')
+  }
+}
 
 // ---- 无头启动验证（10s 超时）----
 /**
@@ -242,13 +328,23 @@ function probeLaunch(pw, exe) {
 
 // ---- 主流程 ----
 /**
- * 主流程：加载 playwright-core → 组装候选 → 缓存命中直接返回 →
- * 逐候选无头验证 → 首个可用者写入缓存并输出协议行。
+ * 主流程：
+ *   1) 清单模式（--list）：只做存在性检查后输出 JSON 数组并退出（不需要 playwright-core）。
+ *   2) 用户显式指定（--prefer）：缓存同路径秒回；否则无头验证它，通过则写 preferred 槽；
+ *      失败只降级（WARN）继续走自动探测。
+ *   3) 自动探测：auto 槽缓存命中直接返回，否则逐候选无头验证，首个可用者写入 auto 槽。
  * 任一环节失败：stderr 输出原因并以 exit 1 终止（绝不下载浏览器）。
  */
 async function main() {
-  const stateDir = stateDirArg
-  const listOnly = process.argv.includes('--list')
+  if (listOnly) {
+    const found = groupedCandidates()
+    for (const c of found) {
+      process.stderr.write(c.name.padEnd(9) + ' | ' + (c.exists ? 'FOUND  ' : 'missing') + ' | ' + c.path + '\n')
+    }
+    console.log(JSON.stringify(found))
+    return
+  }
+
   let pw
   try {
     pw = require('playwright-core')
@@ -257,32 +353,43 @@ async function main() {
     process.exit(1)
   }
 
-  const candidates = candidateList()
-  if (listOnly) {
-    for (const c of candidates) {
-      process.stderr.write(c.name.padEnd(9) + ' | ' + (fs.existsSync(c.path) ? 'FOUND  ' : 'missing') + ' | ' + c.path + '\n')
-    }
-    process.exit(0)
-  }
-  logDebug('候选浏览器 ' + candidates.length + ' 个: ' + candidates.map((c) => c.path).join(' | '))
+  const cache = readCache()
 
-  // 缓存优先：上次探测成功且文件仍存在 → 直接返回（秒开，不再启动探测进程）
-  const configFile = path.join(stateDir, 'browser-config.json')
-  try {
-    const cfg = JSON.parse(fs.readFileSync(configFile, 'utf8'))
-    if (cfg && cfg.path && fs.existsSync(cfg.path)) {
-      logInfo('缓存命中，跳过无头验证: ' + (cfg.name || 'Browser') + '（' + cfg.path + '）')
-      console.log(JSON.stringify({ name: cfg.name || 'Browser', path: cfg.path, cached: true }))
+  // ---- 用户显式选择的浏览器优先 ----
+  if (preferPath) {
+    if (cache.preferred && samePath(cache.preferred.path, preferPath) && fs.existsSync(cache.preferred.path)) {
+      logInfo('缓存命中（用户指定），跳过无头验证: ' + (cache.preferred.name || 'Browser') + '（' + cache.preferred.path + '）')
+      console.log(JSON.stringify({ name: cache.preferred.name || 'Browser', path: cache.preferred.path, cached: true, preferred: true }))
       return
     }
-  } catch (err) {
-    logDebug('浏览器缓存不可用（首次或已损坏），重新探测')
+    if (!fs.existsSync(preferPath)) {
+      logWarn('用户指定的浏览器已不存在，回退自动探测: ' + preferPath)
+    } else {
+      const name = nameForPath(preferPath)
+      const startedAt = Date.now()
+      logInfo('验证用户指定浏览器 ' + name + ' … ' + preferPath)
+      if (await probeLaunch(pw, preferPath)) {
+        writeCache({ preferred: { name: name, path: preferPath, probedAt: new Date().toISOString() } })
+        logInfo(name + ' 无头验证通过（用户指定，耗时 ' + (Date.now() - startedAt) + 'ms）')
+        console.log(JSON.stringify({ name: name, path: preferPath, preferred: true }))
+        return
+      }
+      logWarn('用户指定的浏览器无法启动，回退自动探测: ' + preferPath)
+    }
   }
 
-  const existing = candidates.filter((c) => fs.existsSync(c.path))
+  // ---- 自动探测：缓存优先 ----
+  if (cache.auto && fs.existsSync(cache.auto.path)) {
+    logInfo('缓存命中，跳过无头验证: ' + (cache.auto.name || 'Browser') + '（' + cache.auto.path + '）')
+    console.log(JSON.stringify({ name: cache.auto.name || 'Browser', path: cache.auto.path, cached: true }))
+    return
+  }
+
+  const existing = groupedCandidates().filter((c) => c.exists)
   if (existing.length === 0) {
+    const all = groupedCandidates()
     logError('未检测到任何已安装的浏览器。')
-    logError('已检查: ' + (candidates.length ? candidates.map((c) => c.path).join(' | ') : '(无候选路径)'))
+    logError('已检查: ' + (all.length ? all.map((c) => c.path).join(' | ') : '(无候选路径)'))
     logError('请安装 Chrome 或 Edge 后重试。本插件不会自动下载任何浏览器。')
     process.exit(1)
   }
@@ -292,13 +399,7 @@ async function main() {
     logInfo('验证 ' + c.name + ' … ' + c.path)
     const ok = await probeLaunch(pw, c.path)
     if (ok) {
-      try {
-        fs.writeFileSync(configFile, JSON.stringify({
-          name: c.name, path: c.path, probedAt: new Date().toISOString(),
-        }))
-      } catch (err) {
-        logWarn('浏览器缓存写入失败（下次启动需重新无头验证，可继续）')
-      }
+      writeCache({ auto: { name: c.name, path: c.path, probedAt: new Date().toISOString() } })
       logInfo(c.name + ' 无头验证通过（耗时 ' + (Date.now() - startedAt) + 'ms）')
       console.log(JSON.stringify({ name: c.name, path: c.path }))
       return

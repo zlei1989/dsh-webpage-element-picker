@@ -7,8 +7,10 @@
 - **代码变更后、进入审查阶段前，必须先执行类型检查** — `pnpm typecheck`（即 `tsc --noEmit`），修复所有错误后再进入代码审查；本仓库无 ESLint/formatter 配置
 - **host 半（`src/host/`）禁止引入 npm 运行时依赖** — 只能导入 node 内置模块与 `@deepseek-ai/cordis` 类型，其余全部内联打包；client 半（`src/client/`）运行时只允许两个外部依赖：`react`（经 `src/client/react.ts` 单点引入）与 `@deepseek-ai/dsh-client-ui-primitives`（经 `src/client/primitives.ts` 单点引入）。两者都由 harness 浏览器模块表提供，必须在 `package.json` 的 `dsh.client.external` 声明并同步到 `tsup.config.ts` 的 client `external`
 - **client 样式只用 `--dsw-*` 语义令牌** — 插件自有 CSS 内联在 `src/client/index.ts` 的 `STYLE_CSS` 字符串里（无 CSS 构建步骤），颜色一律取令牌；不写颜色字面量、不做 `data-ds-dark-theme` 主题分支（浅/深色由 harness 切 `body` 属性 + 令牌自动生效）
+- **别和原语 Modal 的内边距叠加** — 原语 `.body` 自带 24px 左右内边距（降级卡片没有），所以自有区块在 `.dsh-we-dialogPrimitive` 下把自己的左右内边距清零，否则左右 48px、底边只有卡片的 24px，四周留白失衡（"底部边缘太窄"就是这么来的）；卡片底边 24px 由原语 `padding: 0 0 24px` 提供，底部栏不再叠 `margin-top`（`.dsh-we-panelBody` 的 20px gap 已给出与正文的间距）
 - **修改 `src/` 后必须重新 `pnpm build`** — client 半被 DSH client-modules 按 bundle rev 缓存，构建后需重启 `dsh web`（仅 HMR 开发模式可热更）
-- **绝不下载浏览器** — 运行时只探测系统已安装的 Chrome > Edge > Chromium > Brave > Opera；全失败则报错退出
+- **绝不下载浏览器** — 运行时只探测系统已安装的 Chrome > Edge > Chromium > Brave > Opera；全失败则报错退出。UI 里选定的浏览器只作为"优先验证"（probe `--prefer`），验证不过仍回退自动探测，不允许用户选择让启动直接失败
+- **浏览器选择记忆在 client 的 localStorage**（键 `dsh-webpage-element-picker.browser`，值 `{name, path}`），随 `picker-navigate` 回传 host；host 侧换浏览器 = 先 `quit` 关旧窗口再以新浏览器重启 helper，同一浏览器不重启
 - 数据通道不依赖子进程管道（Chromium 在 Windows 会关闭 stdin）— 命令/事件一律走 DSH 自带 HTTP 路由（`/poll` 长轮询、`/events`、`/invoke`）
 
 ## 目录
@@ -19,6 +21,7 @@ dsh-webpage-element-picker/  # DSH 组合包（bundle），单包，pnpm 管理
 │   ├── host/       # Host 半：原生 Cordis 插件（子进程/HTTP 路由/动态工具/系统提示），构建为 lib/index.js（ESM）
 │   ├── client/     # Client 半：conversation.input.left 十字图标 + 对话框，构建为 lib/client.js（CJS + ModuleLoader 包裹）
 │   │               #   primitives.ts 取 DSH 官方 Modal/Button；primitives-types.d.ts 声明其类型表面
+│   │               #   「打开」为拆分按钮：左半打开、右半展开浏览器下拉菜单（记忆在 localStorage）
 │   └── shared/     # host ↔ client 经 HTTP 交换的状态/事件形状（type-only）
 ├── resources/      # 运行时资源：bootstrap.cjs / browser-probe.cjs / helper-playwright.js / inspector.js
 │   └── test/       # 测试：check-env.cjs（跨平台环境自检）/ driver.cjs 冒烟驱动 + CSP 测试页

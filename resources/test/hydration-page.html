@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<!-- hydration 探针的回退页（外部站点不可达时使用）。
+     Agent 用法：
+       node resources/test/hydration-probe.cjs                                  # 默认 Next.js 页
+       node resources/test/hydration-probe.cjs file:///<本文件绝对路径> ../inspector.js 1
+     页面自带三个「框架拥有 <html>/<body>」的等价特征，用来在离线环境下判定
+     inspector 有没有往根元素写行内样式：
+       ① html/body 上声明了光标（html{cursor:auto} / body{cursor:default}）——旧版注入以
+          行内样式压过它们，改正后由注入的 <style> 接管（父声明带 !important 时不越权）；
+       ② id="btn"/id="txt" 分别声明 cursor:pointer / cursor:text，用来验证「子元素自己的
+          光标仍然生效」没被插件破坏；
+       ③ 首个脚本把根元素当时的行内 style 记到 body 的 data-server-* 属性上，充当
+          「服务端序列化出来的 HTML 快照」——探针比对这些标记与当前属性，不一致即失配。
+     判据：注入后 html/body 的 style 属性必须与 data-server-* 一致（都为 null）。 -->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>DSH WE hydration probe</title>
+<style>
+  html { cursor: auto; }
+  body { cursor: default; margin: 0; font-family: system-ui, sans-serif; }
+  #btn { cursor: pointer; margin: 40px; padding: 8px 16px; }
+  #txt { cursor: text; margin: 0 40px; padding: 6px; }
+</style>
+</head>
+<body>
+<h1 style="margin:24px 40px 0">hydration 探针回退页</h1>
+<button id="btn">提交订单</button>
+<input id="txt" value="文本输入框">
+<script>
+  // 服务端快照：此刻（尚未有任何注入）根元素的行内 style —— 探针据此判定有没有被改过
+  var serverHtml = document.documentElement.getAttribute('style')
+  var serverBody = document.body.getAttribute('style')
+  document.body.setAttribute('data-server-html-style', serverHtml === null ? 'null' : serverHtml)
+  document.body.setAttribute('data-server-body-style', serverBody === null ? 'null' : serverBody)
+</script>
+</body>
+</html>

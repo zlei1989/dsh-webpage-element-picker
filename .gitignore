@@ -57,8 +57,8 @@ data/
 # agent
 .superpowers
 .playwright-mcp
+.probe-*
 **/worktrees/
-/*.png
 
 # SDD 执行过程产物
 /.superpowers/

@@ -4,7 +4,9 @@
 // （CSP 测试页），经 test-drive.js 模拟用户点选元素，再验证窗口可见性
 // （Windows 用 check-windows.ps1；其他平台记录 skipped）、status/reinject
 // 命令，18s 后落盘 result.json 并杀树。
-// 用法: node driver.cjs <npm-cli.js 路径>；整体 300s 安全兜底，永不挂起。
+// 用法: node driver.cjs <npm-cli.js 路径> [优先浏览器可执行文件路径]；整体 300s 安全兜底，永不挂起。
+// 第二个参数可选：透传给 bootstrap 作为「优先验证的浏览器」——本机已有另一个 helper
+// 占着某个浏览器的持久化 profile 时，用别的浏览器跑冒烟，避免 profile 被占用而启动失败。
 const { spawn, execSync } = require('child_process')
 const http = require('http')
 const fs = require('fs')
@@ -13,6 +15,7 @@ const path = require('path')
 const here = __dirname
 const root = path.join(here, '..')
 const npmCli = process.argv[2]
+const preferBrowser = String(process.argv[3] || '').trim()
 const out = { events: [], errors: [], exitCode: null }
 const log = (m) => { console.log('[driver] ' + m) }
 
@@ -113,8 +116,10 @@ function sendCommand(cmd) {
 server.listen(0, '127.0.0.1', () => {
   const port = server.address().port
   log('mock DSH server on 127.0.0.1:' + port)
-  log('spawning bootstrap with npm-cli: ' + npmCli)
-  const child = spawn(process.execPath, [path.join(root, 'bootstrap.cjs'), npmCli, String(port)], {
+  log('spawning bootstrap with npm-cli: ' + npmCli + (preferBrowser ? ' · prefer browser: ' + preferBrowser : ''))
+  const bootstrapArgv = [path.join(root, 'bootstrap.cjs'), npmCli, String(port)]
+  if (preferBrowser) bootstrapArgv.push(preferBrowser)
+  const child = spawn(process.execPath, bootstrapArgv, {
     stdio: ['pipe', 'pipe', 'pipe'],
   })
   let buf = ''

@@ -204,6 +204,16 @@ function attachPage(page, isMain) {
  * 确保浏览器上下文已启动（单例）：以系统浏览器可执行文件 +
  * 持久化 profile 目录启动有头窗口；挂载主页面/弹窗/关闭事件。
  * 启动时可能已有初始 about:blank 页面（早于 'page' 事件监听器），需兼容。
+ *
+ * 视口必须等于窗口真实渲染区，所以**显式关掉 Playwright 的 viewport 覆盖**
+ * （viewport: null）：Playwright 的 viewport 是设备度量覆盖（emulation），窗口装
+ * 不下也照报。实测本机工作区 1440x852 时，请求 1200x820 + 约 91px 浏览器 chrome
+ * ≈ 911px 超过工作区 → 窗口被系统压扁，真实渲染区只有 1195x747，而页面仍按
+ * 1200x820 排版：底部 73px 画在屏幕外。inspector 只信 window.innerHeight，于是
+ * 把操作栏放进这条看不见的带里 = 卡片「溢出屏幕」且点不到。
+ * viewport: null 后 window.innerWidth/innerHeight 恒等于真实可见区，页面内所有
+ * 定位计算自动变准；--start-maximized 让窗口仍占满可用工作区（macOS 忽略该开关，
+ * 此时窗口用系统默认尺寸，但「视口不说谎」这一条不变）。
  */
 async function ensureBrowser() {
   if (ctx) return ctx
@@ -213,7 +223,8 @@ async function ensureBrowser() {
   const c = await chromium.launchPersistentContext(profileDir, {
     executablePath: browserPath,
     headless: false,
-    viewport: { width: 1200, height: 820 },
+    viewport: null,
+    args: ['--start-maximized'],
   })
   ctx = c
   c.on('page', (page) => {
